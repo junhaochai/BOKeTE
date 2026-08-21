@@ -19,8 +19,11 @@ import torch
 import tqdm
 from torch.utils.data import DataLoader
 
+import time
+from datetime import datetime
+
 from bokete.metrics import TrainingMetrics
-from bokete.utils import set_seed, determine_device
+from bokete.utils import set_seed, determine_device, log_model_info, get_device_name, format_duration
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +42,8 @@ class EarlyStopping:
 
     def step(self, val_loss):
         """Record this epoch's validation loss. Returns True when patience is exhausted."""
+        if self.patience is None or self.patience <= 0:
+            return False
         if val_loss < self.best_loss - self.min_delta:
             self.best_loss = val_loss
             self.bad_epochs = 0
@@ -54,13 +59,16 @@ class Checkpoint:
     validation loss and model state_dict.
     """
 
-    def __init__(self, directory, save_best=True, save_last=True):
+    def __init__(self, directory, save_best=True, save_last=True, enabled=True):
         self.directory = Path(directory)
         self.save_best = save_best
         self.save_last = save_last
+        self.enabled = enabled
         self.best_loss = float('inf')
 
     def update(self, model, epoch, val_loss, optimizer=None):
+        if not self.enabled or not (self.save_best or self.save_last):
+            return
         self.directory.mkdir(parents=True, exist_ok=True)
         # Extract inner model from multi-GPU wrapper (DataParallel/DDP), or fallback to raw model on single-GPU/CPU
         raw_model = getattr(model, 'module', model)
@@ -131,6 +139,7 @@ class Trainer:
         prepare_batch: Optional[Callable] = None,
         max_grad_norm: Optional[float] = None,
         amp: bool = False,
+        log_model_structure: bool = False,
     ):
         self.model = model
         self.criterion = criterion
@@ -140,6 +149,7 @@ class Trainer:
         self.max_grad_norm = max_grad_norm
 
         self.model.to(self.device)
+        log_model_info(self.model, log_layers=log_model_structure)
 
         # AMP only applies on CUDA; on CPU both autocast and the scaler become no-ops.
         self.amp_active = amp and self.device.type == 'cuda'
@@ -232,6 +242,14 @@ class Trainer:
             TrainingMetrics: An object containing lists of training and validation losses.
         """
         metrics = TrainingMetrics()
+        start_dt = datetime.now()
+        start_time_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+        metrics.start_time = start_time_str
+
+        dev_gpu = get_device_name(self.device)
+        metrics.device_name = f"{self.device} ({dev_gpu})" if (dev_gpu and dev_gpu.lower() != self.device.type.lower()) else str(self.device)
+
+        t0 = time.time()
         self._last_spatial_shape = None
         self._variable_shapes_detected = False
 
@@ -279,7 +297,23 @@ class Trainer:
                     if stop_training:
                         metrics.stopped_early = True
                         break
+
+            t1 = time.time()
+            end_dt = datetime.now()
+            end_time_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+            elapsed = round(t1 - t0, 2)
+            metrics.end_time = end_time_str
+            metrics.duration_seconds = elapsed
+
+            logger.info(
+                f"[BOKeTE] Training complete in {format_duration(elapsed)} | "
+                f"Start: {start_time_str} | End: {end_time_str}"
+            )
         except KeyboardInterrupt:
+            t1 = time.time()
+            end_dt = datetime.now()
+            metrics.end_time = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+            metrics.duration_seconds = round(t1 - t0, 2)
             logger.warning("\n[BOKeTE] Training loop interrupted by user (KeyboardInterrupt). Aborting remaining epochs...")
             metrics.interrupted = True
             raise

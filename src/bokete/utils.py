@@ -52,6 +52,37 @@ def set_seed(seed: int, deterministic: bool = False) -> None:
         os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
 
+def get_device_name(device: Optional[torch.device | str] = None) -> str:
+    """Return the friendly hardware name of the specified or active PyTorch device."""
+    if device is None:
+        dev = determine_device(verbose=False)
+    else:
+        dev = torch.device(device)
+
+    if dev.type == "cuda":
+        if torch.cuda.is_available():
+            idx = dev.index if dev.index is not None else torch.cuda.current_device()
+            return torch.cuda.get_device_name(idx)
+        return "CUDA GPU"
+    elif dev.type == "mps":
+        return "Apple Silicon (MPS)"
+    return "CPU"
+
+
+def format_duration(seconds: Optional[float]) -> str:
+    """Formats duration in seconds into a human-readable string (e.g., '14.20s', '03m 45s', '01h 10m 05s')."""
+    if seconds is None or seconds < 0:
+        return "N/A"
+    seconds = float(seconds)
+    if seconds < 60:
+        return f"{seconds:.2f}s"
+    minutes, secs = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours > 0:
+        return f"{hours:02d}h {minutes:02d}m {secs:02d}s"
+    return f"{minutes:02d}m {secs:02d}s"
+
+
 def determine_device(verbose: bool = True) -> torch.device:
     """Return the best available PyTorch device: CUDA, MPS (Mac), or CPU."""
     if torch.cuda.is_available():
@@ -62,7 +93,11 @@ def determine_device(verbose: bool = True) -> torch.device:
         dev = torch.device('cpu')
 
     if verbose:
-        logger.info(f"[BOKeTE] Using device: {dev}")
+        dev_name = get_device_name(dev)
+        if dev_name and dev_name.lower() != dev.type.lower():
+            logger.info(f"[BOKeTE] Using device: {dev} ({dev_name})")
+        else:
+            logger.info(f"[BOKeTE] Using device: {dev}")
 
     return dev
 
@@ -105,11 +140,92 @@ def log_dataset_info(
         logger.info(f"[BOKeTE] Loaded Validation dataset subset: {val_samples:,} samples")
 
 
-def log_trial_start(trial_num: int, total_trials: int, name: str = "") -> None:
-    """Logs a standardized trial header with clean unformatted console spacing."""
+def log_trial_start(trial_num: int, total_trials: int, experiment_name: str) -> None:
+    """Logs a standardized trial header with clean unformatted console spacing.
+
+    Raises:
+        ValueError: If experiment_name is empty, None, or only whitespace.
+    """
+    if not experiment_name or not str(experiment_name).strip():
+        raise ValueError(
+            "An experiment_name must be provided to log_trial_start(). "
+            "Got empty or invalid experiment name."
+        )
+
+    clean_name = str(experiment_name).strip()
     logger.info("")
-    label = f" [{name}]" if name else ""
-    logger.info(f"[BOKeTE] --- Starting Trial {trial_num}/{total_trials}{label} ---")
+    logger.info(f"[BOKeTE] --- Starting Trial {trial_num}/{total_trials} [{clean_name}] ---")
+
+
+def log_model_info(
+    model: torch.nn.Module,
+    log_layers: bool = False,
+) -> Dict[str, Any]:
+    """Logs standardized parameter counts and class name for any PyTorch module.
+
+    If log_layers is True (or logger DEBUG level is active), also logs full layer structure.
+    Returns a dictionary containing model_name, total_params, trainable_params, and structure.
+    """
+    raw_model = getattr(model, "module", model)
+    model_name = raw_model.__class__.__name__
+
+    total_params = sum(p.numel() for p in raw_model.parameters())
+    trainable_params = sum(p.numel() for p in raw_model.parameters() if p.requires_grad)
+    structure_str = str(raw_model)
+
+    logger.info(
+        f"[BOKeTE] Model architecture: {model_name} "
+        f"({total_params:,} total params | {trainable_params:,} trainable params)"
+    )
+
+    if log_layers or logger.isEnabledFor(logging.DEBUG):
+        logger.info(f"[BOKeTE] Model layer structure:\n{structure_str}")
+
+    return {
+        "model_name": model_name,
+        "total_params": total_params,
+        "trainable_params": trainable_params,
+        "structure": structure_str,
+    }
+
+
+
+def setup_logging(
+    log_file: Optional[str | Path] = None,
+    level: int = logging.INFO,
+    console: bool = True,
+) -> None:
+    """Configures the root logger with BOKeTEFormatter, console output, and optional file output."""
+    root_logger = logging.getLogger()
+    if root_logger.level == logging.NOTSET or root_logger.level > level:
+        root_logger.setLevel(level)
+
+    formatter = BOKeTEFormatter("%(asctime)s [%(levelname)s] %(message)s", "%Y-%m-%d %H:%M:%S")
+
+    if console:
+        has_console = any(
+            isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+            for h in root_logger.handlers
+        )
+        if not has_console:
+            ch = logging.StreamHandler()
+            ch.setFormatter(formatter)
+            root_logger.addHandler(ch)
+
+    if log_file:
+        file_path = Path(log_file).resolve()
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        already_attached = any(
+            isinstance(h, logging.FileHandler) and Path(getattr(h, "baseFilename", "")).resolve() == file_path
+            for h in root_logger.handlers
+        )
+        if not already_attached:
+            fh = logging.FileHandler(file_path, mode="a", encoding="utf-8")
+            fh.setFormatter(formatter)
+            root_logger.addHandler(fh)
+
+    for h in root_logger.handlers:
+        h.setFormatter(formatter)
 
 
 def create_run_directory(
@@ -148,15 +264,7 @@ def create_run_directory(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     if attach_file_logger:
-        log_path = run_dir / "experiment.log"
-        handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
-        formatter = BOKeTEFormatter("%(asctime)s [%(levelname)s] %(message)s", "%Y-%m-%d %H:%M:%S")
-        handler.setFormatter(formatter)
-
-        root_logger = logging.getLogger()
-        root_logger.addHandler(handler)
-        for h in root_logger.handlers:
-            h.setFormatter(formatter)
+        setup_logging(log_file=run_dir / "experiment.log")
 
     logger.info(f"[BOKeTE] Created Experiment Run Directory: {run_dir}")
     return run_dir

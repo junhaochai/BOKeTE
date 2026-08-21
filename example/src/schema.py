@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass
@@ -19,13 +20,15 @@ class TrainingConfig:
     lr: float = 1e-3
     optimizer: str = "Adam"
     loss: str = "CrossEntropyLoss"
-    patience: int = 3
+    patience: Optional[int] = 3
+    save_checkpoints: bool = True
 
 
 @dataclass
 class ExperimentConfig:
     experiment_name: str = "mnist_mlp_demo"
     seed: int = 42
+    trials: int = 3
     data: DataConfig = field(default_factory=DataConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)

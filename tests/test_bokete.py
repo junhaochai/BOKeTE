@@ -15,12 +15,19 @@ from bokete import (
     EarlyStopping,
     Trainer,
     TrainingMetrics,
+    create_trial_runner,
     determine_device,
     experiment_report,
+    format_duration,
+    get_device_name,
+    log_model_info,
+    log_trial_start,
     multi_trial_report,
     plot_loss_curves,
     set_seed,
+    setup_logging,
     training_report,
+    trial_runner,
 )
 
 
@@ -43,6 +50,12 @@ class TestBokete(unittest.TestCase):
         self.assertFalse(stopper.step(0.99))  # no improvement > min_delta
         self.assertTrue(stopper.step(0.99))   # bad_epochs >= patience
 
+    def test_early_stopping_none_patience(self):
+        stopper = EarlyStopping(patience=None)
+        self.assertFalse(stopper.step(1.0))
+        self.assertFalse(stopper.step(0.5))
+        self.assertFalse(stopper.step(2.0))
+
     def test_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             ckpt = Checkpoint(directory=tmp_dir)
@@ -54,6 +67,15 @@ class TestBokete(unittest.TestCase):
 
             self.assertTrue(last_path.exists())
             self.assertTrue(best_path.exists())
+
+    def test_checkpoint_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            target_dir = Path(tmp_dir) / 'checkpoints'
+            ckpt = Checkpoint(directory=target_dir, enabled=False)
+            model = nn.Linear(2, 2)
+            ckpt.update(model, epoch=1, val_loss=0.5)
+
+            self.assertFalse(target_dir.exists())
 
     def test_training_report(self):
         metrics_dict = {
@@ -314,6 +336,183 @@ class TestBokete(unittest.TestCase):
             self.assertTrue(run_dir.exists())
             self.assertEqual(run_dir.parent.name, "my_experiment")
 
+    def test_log_model_info(self):
+        model = nn.Sequential(
+            nn.Linear(10, 5),
+            nn.ReLU(),
+            nn.Linear(5, 1)
+        )
+        info = log_model_info(model, log_layers=True)
+        self.assertEqual(info["model_name"], "Sequential")
+        self.assertEqual(info["total_params"], 61)
+        self.assertEqual(info["trainable_params"], 61)
+        self.assertIn("Linear", info["structure"])
+
+    def test_experiment_report_with_model(self):
+        model = nn.Sequential(
+            nn.Linear(10, 5),
+            nn.ReLU(),
+            nn.Linear(5, 1)
+        )
+        config = {"experiment_name": "model_test", "lr": 0.01}
+        metrics = TrainingMetrics(train_loss=[0.5, 0.2], val_loss=[0.6, 0.3])
+        report_md = experiment_report(
+            config=config,
+            metrics=metrics,
+            model=model,
+            title="Model Logging Report",
+        )
+        self.assertIn("## Model Architecture", report_md)
+        self.assertIn("- **Model Class:** `Sequential`", report_md)
+        self.assertIn("Sequential", report_md)
+        self.assertIn("View Model Layer Hierarchy", report_md)
+
+    def test_log_trial_start_validation(self):
+        # Valid experiment_name should succeed
+        log_trial_start(1, 5, "baseline_run")
+        log_trial_start(1, 5, experiment_name="baseline_run")
+
+        # Empty, None, or whitespace experiment_name must raise ValueError
+        with self.assertRaises(ValueError):
+            log_trial_start(1, 5, "")
+
+        with self.assertRaises(ValueError):
+            log_trial_start(1, 5, "   ")
+
+        with self.assertRaises(ValueError):
+            log_trial_start(1, 5, None)  # type: ignore
+
+    def test_create_trial_runner(self):
+        def model_factory(cfg):
+            return nn.Linear(5, 1)
+
+        def loader_factory(cfg):
+            x = torch.randn(20, 5)
+            y = torch.randn(20, 1)
+            ds = TensorDataset(x, y)
+            loader = DataLoader(ds, batch_size=5)
+            return loader, loader
+
+        runner = create_trial_runner(model_factory, loader_factory)
+        alias_runner = trial_runner(model_factory, loader_factory)
+        self.assertIsNotNone(alias_runner)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "experiment_name": "test_runner",
+                "seed": 42,
+                "output_dir": tmpdir,
+                "training": {"epochs": 2, "lr": 0.01, "loss": "MSELoss", "optimizer": "Adam"},
+            }
+            metrics = runner(1, config)
+            self.assertIn("train_loss", metrics)
+            self.assertIn("val_loss", metrics)
+            self.assertTrue((Path(tmpdir) / "test_runner" / "trial_1" / "report.md").exists())
+
+    def test_setup_logging(self):
+        import logging
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "test.log"
+            setup_logging(log_file=log_path)
+            
+            logger = logging.getLogger("test_logger")
+            logger.info("Test log entry")
+
+            self.assertTrue(log_path.exists())
+            content = log_path.read_text(encoding="utf-8")
+            self.assertIn("Test log entry", content)
+
+            # Close and remove file handler so Windows can clean up temp directory
+            root_logger = logging.getLogger()
+            for h in list(root_logger.handlers):
+                if isinstance(h, logging.FileHandler):
+                    h.close()
+                    root_logger.removeHandler(h)
+
+    def test_get_device_name(self):
+        dev_name = get_device_name()
+        self.assertIsInstance(dev_name, str)
+        self.assertGreater(len(dev_name), 0)
+
+    def test_format_duration(self):
+        self.assertEqual(format_duration(None), "N/A")
+        self.assertEqual(format_duration(12.34), "12.34s")
+        self.assertEqual(format_duration(135.0), "02m 15s")
+        self.assertEqual(format_duration(3665.0), "01h 01m 05s")
+
+    def test_trainer_timing_and_device_logging(self):
+        x = torch.randn(20, 4)
+        y = torch.randint(0, 2, (20,))
+        loader = DataLoader(TensorDataset(x, y), batch_size=5)
+
+        model = nn.Linear(4, 2)
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+        criterion = nn.CrossEntropyLoss()
+
+        trainer = Trainer(model, criterion, optimizer)
+        metrics = trainer.fit(loader, loader, epochs=2, progress=False)
+
+        self.assertIsNotNone(metrics.start_time)
+        self.assertIsNotNone(metrics.end_time)
+        self.assertIsNotNone(metrics.duration_seconds)
+        self.assertIsNotNone(metrics.device_name)
+        self.assertGreater(metrics.duration_seconds, 0)
+
+        report = training_report(metrics)
+        self.assertIn("start_time", report)
+        self.assertIn("end_time", report)
+        self.assertIn("duration_seconds", report)
+        self.assertIn("duration_formatted", report)
+        self.assertIn("device_name", report)
+
+    def test_experiment_report_timing_and_gpu(self):
+        config = {'lr': 0.001, 'batch_size': 16}
+        metrics_summary = {
+            'final_train_loss': 0.2,
+            'final_val_loss': 0.3,
+            'mean_train_loss': 0.5,
+            'mean_val_loss': 0.6,
+            'best_epoch': 2,
+            'start_time': '2026-08-12 12:00:00',
+            'end_time': '2026-08-12 12:02:15',
+            'duration_seconds': 135.0,
+            'device_name': 'cuda:0 (NVIDIA GeForce RTX 4090)',
+        }
+        train_loss = [0.9, 0.2]
+        val_loss = [0.95, 0.3]
+
+        md = experiment_report(
+            config=config,
+            metrics_summary=metrics_summary,
+            train_loss=train_loss,
+            val_loss=val_loss,
+            graph_filename="graph_timing.png",
+        )
+
+        self.assertIn("- **Start Date:** `2026-08-12 12:00:00`", md)
+        self.assertIn("- **End Date:** `2026-08-12 12:02:15`", md)
+        self.assertIn("- **Time Taken:** `02m 15s` (`135.00s`)", md)
+        self.assertIn("- **Execution Device:** `cuda:0 (NVIDIA GeForce RTX 4090)`", md)
+
+    def test_multi_trial_report_timing_and_gpu(self):
+        config = {"experiment_name": "timing_test", "dataset": "mixed", "lr": 0.001}
+        all_metrics = [
+            {"train_loss": [0.9, 0.2], "val_loss": [0.95, 0.3]},
+            {"train_loss": [0.8, 0.15], "val_loss": [0.9, 0.25]},
+        ]
+        summary_md = multi_trial_report(
+            config,
+            all_metrics,
+            start_time='2026-08-12 12:00:00',
+            end_time='2026-08-12 12:05:00',
+            duration_seconds=300.0,
+        )
+        self.assertIn("- **Start Date:** `2026-08-12 12:00:00`", summary_md)
+        self.assertIn("- **End Date:** `2026-08-12 12:05:00`", summary_md)
+        self.assertIn("- **Total Time Taken:** `05m 00s` (`300.00s`)", summary_md)
+        self.assertIn("- **Execution Device:**", summary_md)
+
 
 if __name__ == '__main__':
     unittest.main()
+

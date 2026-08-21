@@ -1,5 +1,6 @@
 experiment_name: "mnist_mlp_demo"
 seed: 42
+trials: 3
 
 data:
   batch_size: 64
