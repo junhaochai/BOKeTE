@@ -1,0 +1,43 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging / wheel artifacts (Hatchling build outputs)
+build/
+bdist.*/
+dist/
+sdist/
+wheels/
+share/python-wheels/
+*.egg-info/
+.eggs/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Testing & Coverage caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE & Editor noise
+.vscode/
+.idea/
+*.swp
+*.swo
+*.iml
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Output artifacts & logs
+*.log
