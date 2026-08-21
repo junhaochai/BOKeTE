@@ -32,7 +32,6 @@ from bokete.experiments import (
     create_trial_runner,
     run_experiments,
     run_trials,
-    trial_runner,
 )
 from bokete.reporting import experiment_report, multi_trial_report
 
@@ -67,5 +66,4 @@ __all__ = [
     "Trainer",
     "run_experiments",
     "run_trials",
-    "trial_runner",
 ]

@@ -27,6 +27,7 @@ from typing import Dict, Any, Optional, Sequence, Type, TypeVar
 
 import numpy as np
 import torch
+import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -117,8 +118,6 @@ def load_config(config_path: str | Path) -> Dict[str, Any]:
     logger.info(f"[BOKeTE] Loading configuration from: {path}")
 
     with open(path, "r", encoding="utf-8") as f:
-        import yaml
-
         return yaml.safe_load(f) or {}
 
 
@@ -256,11 +255,14 @@ def create_run_directory(
     now = datetime.now()
     date_prefix = now.strftime("%Y%m%d")
 
-    existing = [
-        d for d in target_parent.iterdir()
-        if d.is_dir() and d.name.startswith(date_prefix)
-    ]
-    run_dir = target_parent / f"{date_prefix}-{len(existing)+1:02d}"
+    existing_indices = []
+    for d in target_parent.iterdir():
+        if d.is_dir() and d.name.startswith(date_prefix):
+            parts = d.name.rsplit("-", 1)
+            if len(parts) == 2 and parts[1].isdigit():
+                existing_indices.append(int(parts[1]))
+    next_idx = max(existing_indices, default=0) + 1
+    run_dir = target_parent / f"{date_prefix}-{next_idx:02d}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
     if attach_file_logger:

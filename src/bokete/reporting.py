@@ -13,10 +13,52 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
 
 from bokete.metrics import TrainingMetrics, training_report
-from bokete.plotting import plot_loss_curves
+from bokete.plotting import plot_loss_curves, plot_multi_trial_loss_curves
 from bokete.utils import flatten_dict
 
 logger = logging.getLogger(__name__)
+
+
+def _format_model_section(model: Optional[Any]) -> tuple[str, str]:
+    """Extracts model details and returns formatted (overview_bullet, markdown_section)."""
+    if model is None:
+        return "", ""
+
+    if hasattr(model, "parameters"):
+        raw_m = getattr(model, "module", model)
+        m_name = raw_m.__class__.__name__
+        tot_p = sum(p.numel() for p in raw_m.parameters())
+        trn_p = sum(p.numel() for p in raw_m.parameters() if p.requires_grad)
+        struct_str = str(raw_m)
+    elif isinstance(model, dict):
+        m_name = model.get("model_name", "PyTorch Model")
+        tot_p = model.get("total_params", 0)
+        trn_p = model.get("trainable_params", 0)
+        struct_str = model.get("structure", "")
+    else:
+        m_name = getattr(model, "__class__", type(model)).__name__
+        tot_p = 0
+        trn_p = 0
+        struct_str = str(model)
+
+    bullet = f"- **Model Architecture:** `{m_name}` (`{tot_p:,}` total params | `{trn_p:,}` trainable)"
+
+    layer_block = ""
+    if struct_str:
+        layer_block = (
+            f"\n<details>\n<summary><b>View Model Layer Hierarchy</b></summary>\n\n"
+            f"```text\n{struct_str}\n```\n\n</details>\n"
+        )
+
+    section = (
+        f"\n## Model Architecture\n"
+        f"- **Model Class:** `{m_name}`\n"
+        f"- **Total Parameters:** `{tot_p:,}`\n"
+        f"- **Trainable Parameters:** `{trn_p:,}`\n"
+        f"{layer_block}"
+    )
+
+    return bullet, section
 
 
 def experiment_report(
@@ -158,43 +200,9 @@ def experiment_report(
         overview_bullets.append(f"- **Best Epoch:** `{best_epoch}`")
 
     # 7. Model Architecture Metadata
-    model_section = ""
-    if model is not None:
-        if hasattr(model, "parameters"):
-            raw_m = getattr(model, "module", model)
-            m_name = raw_m.__class__.__name__
-            tot_p = sum(p.numel() for p in raw_m.parameters())
-            trn_p = sum(p.numel() for p in raw_m.parameters() if p.requires_grad)
-            struct_str = str(raw_m)
-        elif isinstance(model, dict):
-            m_name = model.get("model_name", "PyTorch Model")
-            tot_p = model.get("total_params", 0)
-            trn_p = model.get("trainable_params", 0)
-            struct_str = model.get("structure", "")
-        else:
-            m_name = getattr(model, "__class__", type(model)).__name__
-            tot_p = 0
-            trn_p = 0
-            struct_str = str(model)
-
-        overview_bullets.append(
-            f"- **Model Architecture:** `{m_name}` (`{tot_p:,}` total params | `{trn_p:,}` trainable)"
-        )
-
-        layer_block = ""
-        if struct_str:
-            layer_block = (
-                f"\n<details>\n<summary><b>View Model Layer Hierarchy</b></summary>\n\n"
-                f"```text\n{struct_str}\n```\n\n</details>\n"
-            )
-
-        model_section = (
-            f"\n## Model Architecture\n"
-            f"- **Model Class:** `{m_name}`\n"
-            f"- **Total Parameters:** `{tot_p:,}`\n"
-            f"- **Trainable Parameters:** `{trn_p:,}`\n"
-            f"{layer_block}"
-        )
+    model_bullet, model_section = _format_model_section(model)
+    if model_bullet:
+        overview_bullets.append(model_bullet)
 
     overview_section = "\n".join(overview_bullets) if overview_bullets else "- No overview metadata recorded."
 
@@ -254,6 +262,9 @@ def multi_trial_report(
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
     duration_seconds: Optional[float] = None,
+    model: Optional[Any] = None,
+    graph_filename: Optional[str] = "multi_trial_loss.png",
+    auto_plot: bool = True,
 ) -> str:
     """Generates a structured GFM Markdown report summarizing a multi-trial experiment."""
     import numpy as np
@@ -263,7 +274,15 @@ def multi_trial_report(
     out_file: Optional[Path] = None
     if save_path:
         p = Path(save_path)
-        out_file = (p / "multi_trial_report.md") if (p.is_dir() or p.suffix == "" or not p.name.endswith(".md")) else p
+        out_file = (p / "summary-report.md") if (p.is_dir() or p.suffix == "" or not p.name.endswith(".md")) else p
+
+    if auto_plot and graph_filename and out_file and all_trial_metrics:
+        graph_path = out_file.parent / graph_filename
+        plot_multi_trial_loss_curves(
+            all_trial_metrics=all_trial_metrics,
+            path=graph_path,
+            title="Multi-Trial Training & Validation Loss (Mean ± Std)",
+        )
 
     best_val_losses = [min(m['val_loss']) for m in all_trial_metrics if m and 'val_loss' in m and m['val_loss']]
     if not best_val_losses:
@@ -279,17 +298,54 @@ def multi_trial_report(
     max_val = float(np.max(best_val_losses))
     best_trial_idx = int(np.argmin(best_val_losses)) + 1
 
+    # Extract unique extra_metrics keys across all trials (e.g. Test Accuracy, Test Loss)
+    extra_keys: List[str] = []
+    for m in all_trial_metrics:
+        if isinstance(m, dict) and 'extra_metrics' in m and isinstance(m['extra_metrics'], dict):
+            for k in m['extra_metrics'].keys():
+                if k not in extra_keys:
+                    extra_keys.append(k)
+
+    extra_summary_lines = []
+    for k in extra_keys:
+        num_vals = []
+        for m in all_trial_metrics:
+            em = m.get('extra_metrics', {}) if isinstance(m, dict) else {}
+            if k in em:
+                try:
+                    num_vals.append(float(em[k]))
+                except (ValueError, TypeError):
+                    pass
+        if num_vals:
+            m_val = float(np.mean(num_vals))
+            s_val = float(np.std(num_vals))
+            extra_summary_lines.append(f"- **Mean {k}:** `{m_val:.4f} ± {s_val:.4f}`\n")
+
+    extra_summary_str = "".join(extra_summary_lines)
+
     trial_rows = []
     for idx, m in enumerate(all_trial_metrics, 1):
-        v_loss = m.get('val_loss', [])
-        t_loss = m.get('train_loss', [])
+        v_loss = m.get('val_loss', []) if isinstance(m, dict) else []
+        t_loss = m.get('train_loss', []) if isinstance(m, dict) else []
         b_val = min(v_loss) if v_loss else 'N/A'
         b_ep = int(np.argmin(v_loss)) + 1 if v_loss else 'N/A'
         f_tr = t_loss[-1] if t_loss else 'N/A'
         f_vl = v_loss[-1] if v_loss else 'N/A'
-        trial_rows.append(f"| Trial {idx} | `{b_ep}` | `{b_val}` | `{f_tr}` | `{f_vl}` |")
 
-    trial_table = "\n".join(trial_rows)
+        row_cells = [f"| Trial {idx}", f"`{b_ep}`", f"`{b_val}`", f"`{f_tr}`", f"`{f_vl}`"]
+        if extra_keys:
+            em = m.get('extra_metrics', {}) if isinstance(m, dict) else {}
+            for ek in extra_keys:
+                row_cells.append(f"`{em.get(ek, 'N/A')}`")
+        trial_rows.append(" | ".join(row_cells) + " |")
+
+    trial_table_header = "| Trial | Best Epoch | Best Val Loss | Final Train Loss | Final Validation Loss |"
+    trial_table_align = "| :---: | :---: | :---: | :---: | :---: |"
+    if extra_keys:
+        trial_table_header += " " + " | ".join(extra_keys) + " |"
+        trial_table_align += " " + " | ".join([":---:"] * len(extra_keys)) + " |"
+
+    trial_table = f"{trial_table_header}\n{trial_table_align}\n" + "\n".join(trial_rows)
     flat_config = flatten_dict(config)
     param_rows = "\n".join([f"| `{k}` | `{v}` |" for k, v in flat_config.items()])
     exp_name = config.get('experiment_name') or config.get('exp_name') or config.get('name')
@@ -307,22 +363,27 @@ def multi_trial_report(
     dev_str = f"{dev_obj} ({dev_gpu})" if (dev_gpu and dev_gpu.lower() != dev_obj.type.lower()) else str(dev_obj)
     dev_line = f"- **Execution Device:** `{dev_str}`\n"
 
+    model_bullet, model_section = _format_model_section(model)
+    model_line = f"{model_bullet}\n" if model_bullet else ""
+
     if not start_time:
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         start_line = f"- **Execution Date:** `{now_str}`\n"
 
+    loss_graph_section = ""
+    if auto_plot and graph_filename:
+        loss_graph_section = f"\n## Multi-Trial Loss Curves\n![Multi-Trial Loss Curve](./{graph_filename})\n"
+
     report_md = f"""# {header_title}
 
 ## Aggregate Performance ({len(all_trial_metrics)} Trials)
-{exp_bullet}{start_line}{end_line}{dur_line}{dev_line}- **Mean Best Validation Loss:** `{mean_val:.4f} ± {std_val:.4f}`
+{exp_bullet}{start_line}{end_line}{dur_line}{dev_line}{model_line}- **Mean Best Validation Loss:** `{mean_val:.4f} ± {std_val:.4f}`
 - **Lowest Validation Loss (Best Trial):** `{min_val:.4f}` (Trial {best_trial_idx})
 - **Highest Validation Loss:** `{max_val:.4f}`
-
+{extra_summary_str}{model_section}
 ## Per-Trial Performance Breakdown
-| Trial | Best Epoch | Best Val Loss | Final Train Loss | Final Validation Loss |
-| :---: | :---: | :---: | :---: | :---: |
 {trial_table}
-
+{loss_graph_section}
 ## Experiment Configuration
 | Parameter | Value |
 | :--- | :--- |
@@ -334,3 +395,4 @@ def multi_trial_report(
         logger.info(f"[BOKeTE] Saved Multi-Trial Report to: {out_file}")
 
     return report_md
+

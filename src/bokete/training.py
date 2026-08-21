@@ -51,6 +51,11 @@ class EarlyStopping:
             self.bad_epochs += 1
         return self.bad_epochs >= self.patience
 
+    def on_epoch_end(self, trainer: Any, epoch: int, val_loss: float) -> None:
+        """Callback hook for Trainer fit loop."""
+        if self.step(val_loss):
+            trainer.should_stop = True
+
 
 class Checkpoint:
     """
@@ -85,6 +90,10 @@ class Checkpoint:
         if self.save_best and val_loss < self.best_loss:
             self.best_loss = val_loss
             torch.save(state, self.directory / 'best.pt')
+
+    def on_epoch_end(self, trainer: Any, epoch: int, val_loss: float) -> None:
+        """Callback hook for Trainer fit loop."""
+        self.update(trainer.model, epoch, val_loss, optimizer=trainer.optimizer)
 
 
 def _default_prepare_batch(batch, device):
@@ -159,6 +168,8 @@ class Trainer:
         self._last_spatial_shape = None
         self._variable_shapes_detected = False
 
+        self.should_stop = False
+
     def evaluate(self, loader: DataLoader) -> float:
         """Compute the mean loss of `model` over `loader` using Trainer configuration."""
         return evaluate(
@@ -170,13 +181,29 @@ class Trainer:
             amp_active=self.amp_active,
         )
 
-    def _train_epoch(self, train_loader: DataLoader, max_batches: Optional[int] = None) -> float:
+    def _train_epoch(
+        self,
+        train_loader: DataLoader,
+        max_batches: Optional[int] = None,
+        epoch_idx: Optional[int] = None,
+        total_epochs: Optional[int] = None,
+        show_progress: bool = True,
+    ) -> float:
         """Run one training epoch over `train_loader` and return the mean training loss."""
         self.model.train()
         running_loss = 0.0
         batches_run = 0
 
-        for batch in train_loader:
+        desc = f" Epoch {epoch_idx}/{total_epochs}" if (epoch_idx and total_epochs) else " Training"
+        batch_pbar = tqdm.tqdm(
+            train_loader,
+            desc=desc,
+            dynamic_ncols=True,
+            leave=False,
+            disable=not show_progress,
+        )
+
+        for batch in batch_pbar:
             if max_batches is not None and batches_run >= max_batches:
                 break
 
@@ -207,8 +234,11 @@ class Trainer:
             self.scaler.step(self.optimizer)
             self.scaler.update()
 
-            running_loss += loss.item()
+            loss_val = loss.item()
+            running_loss += loss_val
             batches_run += 1
+            avg_loss = running_loss / batches_run
+            batch_pbar.set_postfix(loss=f"{avg_loss:.4f}")
 
         return round(running_loss / max(batches_run, 1), 4)
 
@@ -250,6 +280,7 @@ class Trainer:
         metrics.device_name = f"{self.device} ({dev_gpu})" if (dev_gpu and dev_gpu.lower() != self.device.type.lower()) else str(self.device)
 
         t0 = time.time()
+        self.should_stop = False
         self._last_spatial_shape = None
         self._variable_shapes_detected = False
 
@@ -263,9 +294,15 @@ class Trainer:
             all_callbacks.append(scheduler)
 
         try:
-            with tqdm.tqdm(range(epochs), desc=" Epochs", dynamic_ncols=True, leave=False, disable=not progress) as pbar:
+            with tqdm.tqdm(range(epochs), desc=" Overall Progress", dynamic_ncols=True, leave=True, disable=not progress) as pbar:
                 for epoch in pbar:
-                    train_loss = self._train_epoch(train_loader, max_train_batches)
+                    train_loss = self._train_epoch(
+                        train_loader,
+                        max_batches=max_train_batches,
+                        epoch_idx=epoch + 1,
+                        total_epochs=epochs,
+                        show_progress=progress,
+                    )
                     metrics.train_loss.append(train_loss)
 
                     val_loss = round(self.evaluate(val_loader), 4)
@@ -277,24 +314,16 @@ class Trainer:
                         metrics.best_epoch = epoch + 1
 
                     # Process callbacks at end of epoch
-                    stop_training = False
                     for cb in all_callbacks:
                         if hasattr(cb, 'on_epoch_end'):
-                            res = cb.on_epoch_end(self, epoch + 1, val_loss)
-                            if res is True:
-                                stop_training = True
-                        elif isinstance(cb, EarlyStopping):
-                            if cb.step(val_loss):
-                                stop_training = True
-                        elif isinstance(cb, Checkpoint):
-                            cb.update(self.model, epoch + 1, val_loss, optimizer=self.optimizer)
+                            cb.on_epoch_end(self, epoch + 1, val_loss)
                         elif hasattr(cb, 'step'):
                             if isinstance(cb, torch.optim.lr_scheduler.ReduceLROnPlateau):
                                 cb.step(val_loss)
                             else:
                                 cb.step()
 
-                    if stop_training:
+                    if self.should_stop:
                         metrics.stopped_early = True
                         break
 

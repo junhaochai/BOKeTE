@@ -13,12 +13,15 @@ import logging
 import os
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, Any, List, Callable, Optional
 
 import numpy as np
+import torch
 
-from bokete.reporting import multi_trial_report
-from bokete.utils import set_nested_key, log_trial_start, setup_logging, format_duration
+from bokete.reporting import experiment_report, multi_trial_report
+from bokete.training import Trainer, EarlyStopping, Checkpoint
+from bokete.utils import set_seed, determine_device, get_nested_key, set_nested_key, log_trial_start, setup_logging, format_duration
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +76,7 @@ def run_trials(
     num_trials: int,
     run_fn: Callable[[int, Dict[str, Any]], Dict[str, Any]],
     output_dir: Optional[str] = None,
+    model: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     """Runs a single configuration across multiple trials with standardized logging,
     graceful Ctrl+C cancellation, and optional multi-trial Markdown report generation.
@@ -113,18 +117,15 @@ def run_trials(
     total_duration = round(t1 - t0, 2)
 
     if output_dir and all_metrics:
-        report_md = multi_trial_report(
+        multi_trial_report(
             config,
             all_metrics,
             save_path=output_dir,
             start_time=start_time_str,
             end_time=end_time_str,
             duration_seconds=total_duration,
+            model=model,
         )
-        report_path = os.path.join(output_dir, "summary-report.md")
-        with open(report_path, "w", encoding="utf-8") as f:
-            f.write(report_md)
-        logger.info(f"[BOKeTE] Saved Multi-Trial Summary Report to: {report_path}")
 
     # Log summary statistics if validation losses were recorded
     best_val_losses = [min(m['val_loss']) for m in all_metrics if m and 'val_loss' in m and m['val_loss']]
@@ -150,6 +151,7 @@ def create_trial_runner(
     loader_factory: Callable[[Dict[str, Any]], Any],
     criterion_factory: Optional[Callable[[Dict[str, Any]], Any]] = None,
     optimizer_factory: Optional[Callable[[Any, Dict[str, Any]], Any]] = None,
+    test_fn: Optional[Callable[[Any, Dict[str, Any]], Dict[str, Any]]] = None,
     log_model_structure: bool = True,
 ) -> Callable[[int, Dict[str, Any]], Dict[str, Any]]:
     """Helper factory that constructs a standardized single-trial runner callback for bokete.run_trials.
@@ -159,24 +161,21 @@ def create_trial_runner(
         loader_factory: Callable `(config) -> (train_loader, val_loader)`.
         criterion_factory: Optional callable `(config) -> criterion`.
         optimizer_factory: Optional callable `(model, config) -> optimizer`.
+        test_fn: Optional callable `(model, config) -> dict` returning extra test metrics (e.g. Test Accuracy).
         log_model_structure: Whether to log the full PyTorch model layer structure on trial 1 (default: True).
 
     Returns:
         A callback `(trial_num, config) -> metrics_dict` compatible with bokete.run_trials.
     """
-    import torch
-    from pathlib import Path
-    from bokete.training import Trainer, EarlyStopping, Checkpoint
-    from bokete.reporting import experiment_report
-    from bokete.utils import set_seed, determine_device, get_nested_key
-
     def run_fn(trial_num: int, config: Dict[str, Any]) -> Dict[str, Any]:
         # 1. Set seed per trial for stochastic variance
         base_seed = config.get("seed", 42)
         set_seed(base_seed + (trial_num - 1))
 
         # 2. Build dataloaders & model
-        train_loader, val_loader = loader_factory(config)
+        train_loader, val_loader, *test = loader_factory(config)
+        test_loader = test[0] if test else None
+
         model = model_factory(config)
 
         # 3. Build criterion & optimizer
@@ -195,9 +194,9 @@ def create_trial_runner(
             optimizer = opt_cls(model.parameters(), lr=lr)
 
         # 4. Determine device & run Trainer (log device and structure on trial 1)
-        verbose_device = (trial_num == 1)
-        device = determine_device(verbose=verbose_device)
-        should_log_struct = (log_model_structure and trial_num == 1)
+        is_first_trial = (trial_num == 1)
+        device = determine_device(verbose=is_first_trial)
+        should_log_struct = log_model_structure and is_first_trial
 
         trainer = Trainer(
             model,
@@ -225,26 +224,24 @@ def create_trial_runner(
             checkpoint=Checkpoint(trial_dir / "checkpoints", enabled=save_ckpts),
         )
 
-        # 5. Generate per-trial Markdown report
+        # 5. Evaluate post-training test metrics if test_fn provided
+        extra_metrics = None
+        if test_fn:
+            extra_metrics = test_fn(model, test_loader, config) if test_loader is not None else test_fn(model, config)
+
+        # 6. Generate per-trial Markdown report
         experiment_report(
             config=config,
             metrics=history,
             model=model,
+            extra_metrics=extra_metrics,
             save_path=trial_dir,
             title=f"{exp_name} - Trial {trial_num}",
         )
 
-        if hasattr(history, "as_dict"):
-            return history.as_dict()
-        elif hasattr(history, "to_dict"):
-            return history.to_dict()
-        elif is_dataclass(history):
-            from dataclasses import asdict
-            return asdict(history)
-        return history
+        result = history.as_dict()
+        if extra_metrics:
+            result["extra_metrics"] = extra_metrics
+        return result
 
     return run_fn
-
-
-# Convenient shorthand alias
-trial_runner = create_trial_runner

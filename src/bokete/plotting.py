@@ -8,6 +8,7 @@ Key Functions:
 from pathlib import Path
 import logging
 import matplotlib.pyplot as plt
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -85,3 +86,62 @@ def plot_loss_curves(
     finally:
         if 'fig' in locals():
             plt.close(fig)
+
+
+def plot_multi_trial_loss_curves(
+    all_trial_metrics: list,
+    path="multi_trial_loss.png",
+    title="Multi-Trial Loss Curves (Mean ± Std)",
+):
+    """
+    Plots multi-trial training and validation loss curves with mean and std shaded bands.
+    """
+    train_losses = [m['train_loss'] for m in all_trial_metrics if isinstance(m, dict) and 'train_loss' in m and m['train_loss']]
+    val_losses = [m['val_loss'] for m in all_trial_metrics if isinstance(m, dict) and 'val_loss' in m and m['val_loss']]
+
+    if not train_losses or not val_losses:
+        logger.warning("Empty multi-trial loss lists passed to plot_multi_trial_loss_curves. Skipping plot.")
+        return
+
+    min_epochs = min(min(len(t) for t in train_losses), min(len(v) for v in val_losses))
+    epochs = np.arange(1, min_epochs + 1)
+
+    t_arr = np.array([t[:min_epochs] for t in train_losses])
+    v_arr = np.array([v[:min_epochs] for v in val_losses])
+
+    t_mean, t_std = np.mean(t_arr, axis=0), np.std(t_arr, axis=0)
+    v_mean, v_std = np.mean(v_arr, axis=0), np.std(v_arr, axis=0)
+
+    save_path = Path(path)
+
+    try:
+        fig, ax = plt.subplots(figsize=(10, 5))
+
+        # Individual faint trial lines
+        for i in range(len(t_arr)):
+            ax.plot(epochs, t_arr[i], color='#2b5c8f', alpha=0.2, linewidth=1)
+            ax.plot(epochs, v_arr[i], color='#d95f02', alpha=0.2, linewidth=1)
+
+        # Mean lines
+        ax.plot(epochs, t_mean, label='Mean Train Loss', color='#2b5c8f', linewidth=2.5)
+        ax.plot(epochs, v_mean, label='Mean Validation Loss', color='#d95f02', linewidth=2.5)
+
+        # Shaded ±1 Std bands
+        ax.fill_between(epochs, t_mean - t_std, t_mean + t_std, color='#2b5c8f', alpha=0.15)
+        ax.fill_between(epochs, v_mean - v_std, v_mean + v_std, color='#d95f02', alpha=0.15)
+
+        ax.set_title(title, fontsize=14, pad=15)
+        ax.set_xlabel('Epochs', fontsize=12)
+        ax.set_ylabel('Loss', fontsize=12)
+        ax.grid(True, linestyle=':', alpha=0.6)
+        ax.legend(loc='upper right')
+
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        logger.info(f"[BOKeTE] Saved multi-trial loss curves plot to: {save_path}")
+    except Exception as e:
+        logger.error(f"Failed to save multi-trial loss curve plot to {path}: {e}")
+    finally:
+        if 'fig' in locals():
+            plt.close(fig)
+
