@@ -1,19 +1,66 @@
-from datetime import datetime
-from typing import Dict, Any, List, Optional
+"""
+Markdown report generation for single experiments and multi-trial runs.
 
+Key Functions:
+  - experiment_report : Generates a structured GFM Markdown report string and saves to file.
+  - multi_trial_report: Aggregates statistics across multiple experimental trial runs.
+"""
+
+from dataclasses import is_dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Union
+
+from bokete.metrics import TrainingMetrics, training_report
+from bokete.plotting import plot_loss_curves
 from bokete.utils import flatten_dict
 
 
 def experiment_report(
     config: Dict[str, Any],
-    metrics_summary: Dict[str, Any],
-    train_loss: List[float],
-    val_loss: List[float],
-    graph_filename: str = "graph.png",
+    metrics_summary: Optional[Dict[str, Any]] = None,
+    train_loss: Optional[List[float]] = None,
+    val_loss: Optional[List[float]] = None,
+    graph_filename: Optional[str] = "graph.png",
     extra_metrics: Optional[Dict[str, Any]] = None,
     title: Optional[str] = None,
+    metrics: Optional[Union[TrainingMetrics, Dict[str, Any]]] = None,
+    auto_plot: bool = True,
+    save_path: Optional[str] = None,
 ) -> str:
     """Generates a structured GFM Markdown report string for an experiment run."""
+    # Detect if a TrainingMetrics or metrics dict was passed as 2nd positional argument
+    if hasattr(metrics_summary, 'train_loss') or (
+        isinstance(metrics_summary, dict) and 'train_loss' in metrics_summary and 'final_train_loss' not in metrics_summary
+    ):
+        metrics = metrics_summary
+        metrics_summary = None
+
+    if metrics is not None:
+        if metrics_summary is None:
+            metrics_summary = training_report(metrics)
+        if train_loss is None:
+            if hasattr(metrics, 'train_loss'):
+                train_loss = metrics.train_loss
+            elif isinstance(metrics, dict):
+                train_loss = metrics.get('train_loss', [])
+        if val_loss is None:
+            if hasattr(metrics, 'val_loss'):
+                val_loss = metrics.val_loss
+            elif isinstance(metrics, dict):
+                val_loss = metrics.get('val_loss', [])
+
+        if auto_plot and graph_filename:
+            plot_loss_curves(metrics=metrics, path=graph_filename, title=title or "Training and Validation Loss")
+
+    metrics_summary = metrics_summary or {}
+    train_loss = train_loss or []
+    val_loss = val_loss or []
+
+    if is_dataclass(config):
+        from dataclasses import asdict
+        config = asdict(config)
+
     flat_config = flatten_dict(config)
     param_rows = "\n".join([f"| `{k}` | `{v}` |" for k, v in flat_config.items()])
 
@@ -86,7 +133,7 @@ def experiment_report(
         for epoch, (t, v) in enumerate(zip(train_loss, val_loss))
     ])
 
-    return f"""# {header_title}
+    report_md = f"""# {header_title}
 
 ## Trial Overview
 {overview_section}
@@ -116,18 +163,30 @@ def experiment_report(
 
 </details>
 """
+    if save_path:
+        out_file = Path(save_path)
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text(report_md, encoding="utf-8")
+
+    return report_md
 
 
 def multi_trial_report(
     config: Dict[str, Any],
-    all_trial_metrics: List[Dict[str, Any]]
+    all_trial_metrics: List[Dict[str, Any]],
+    save_path: Optional[str] = None,
 ) -> str:
     """Generates a structured GFM Markdown report summarizing a multi-trial experiment."""
     import numpy as np
 
     best_val_losses = [min(m['val_loss']) for m in all_trial_metrics if m and 'val_loss' in m and m['val_loss']]
     if not best_val_losses:
-        return "# Multi-Trial Experiment Summary\n\nNo trial metrics recorded."
+        report_md = "# Multi-Trial Experiment Summary\n\nNo trial metrics recorded."
+        if save_path:
+            out_file = Path(save_path)
+            out_file.parent.mkdir(parents=True, exist_ok=True)
+            out_file.write_text(report_md, encoding="utf-8")
+        return report_md
 
     mean_val = float(np.mean(best_val_losses))
     std_val = float(np.std(best_val_losses))
@@ -154,7 +213,7 @@ def multi_trial_report(
     exp_bullet = f"- **Experiment Name:** `{exp_name}`\n" if (exp_name and exp_name != config.get('dataset')) else ""
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    return f"""# {header_title}
+    report_md = f"""# {header_title}
 
 ## Aggregate Performance ({len(all_trial_metrics)} Trials)
 {exp_bullet}- **Execution Date:** `{now_str}`
@@ -172,3 +231,9 @@ def multi_trial_report(
 | :--- | :--- |
 {param_rows}
 """
+    if save_path:
+        out_file = Path(save_path)
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text(report_md, encoding="utf-8")
+
+    return report_md

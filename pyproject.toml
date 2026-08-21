@@ -29,7 +29,18 @@ dependencies = [
     "numpy",
     "matplotlib",
     "tqdm",
+    "pyyaml",
+[project.scripts]
+bokete = "bokete.cli:main"
+
+[dependency-groups]
+dev = [
+    "torchvision",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/bokete"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"example" = "bokete/template"
+

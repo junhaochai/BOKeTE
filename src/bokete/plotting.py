@@ -1,3 +1,10 @@
+"""
+Visualization utilities for training and validation metrics.
+
+Key Functions:
+  - plot_loss_curves: Plots per-epoch training/validation loss to static PNG and interactive HTML.
+"""
+
 import json
 from pathlib import Path
 import logging
@@ -6,11 +13,40 @@ import matplotlib.pyplot as plt
 logger = logging.getLogger(__name__)
 
 
-def plot_loss_curves(train_loss, val_loss, path, title='Training and Validation Loss', best_epoch=None):
+def plot_loss_curves(
+    train_loss=None,
+    val_loss=None,
+    path="graph.png",
+    title='Training and Validation Loss',
+    best_epoch=None,
+    metrics=None,
+):
     """
     Plot per-epoch training and validation loss and save a static PNG to `path`, 
     along with a companion interactive HTML file.
+
+    Accepts either individual `train_loss` / `val_loss` lists or a `TrainingMetrics` / dict instance.
     """
+    # Support passing TrainingMetrics or dict as first positional argument
+    if hasattr(train_loss, 'train_loss') or (isinstance(train_loss, dict) and 'train_loss' in train_loss):
+        metrics = train_loss
+        if isinstance(val_loss, (str, Path)):
+            path = val_loss
+        train_loss = None
+        val_loss = None
+
+    if metrics is not None:
+        if hasattr(metrics, 'train_loss'):
+            train_loss = metrics.train_loss
+            val_loss = metrics.val_loss
+            if best_epoch is None:
+                best_epoch = getattr(metrics, 'best_epoch', None)
+        elif isinstance(metrics, dict):
+            train_loss = metrics.get('train_loss', [])
+            val_loss = metrics.get('val_loss', [])
+            if best_epoch is None:
+                best_epoch = metrics.get('best_epoch')
+
     if not train_loss or not val_loss:
         logger.warning("Empty loss lists passed to plot_loss_curves. Skipping plot.")
         return

@@ -1,14 +1,27 @@
 """
-General utility functions for configuration I/O, directory management, logging,
-reproducibility, hardware detection, and dictionary manipulation.
+General utility functions for configuration I/O, directory management, hardware detection, and logging.
+
+Key Classes & Functions:
+  - load_config         : Parses YAML configuration files into dictionaries.
+  - load_config_as      : Loads YAML files directly into user-defined @dataclass schemas.
+  - create_run_directory: Creates timestamped output subfolders (results/exp_name/YYYYMMDD-XX/).
+  - set_seed            : Sets random seeds across Python, NumPy, and PyTorch for reproducibility.
+  - determine_device    : Auto-detects optimal hardware accelerator (CUDA / MPS / CPU).
+  - log_dataset_info    : Formats and logs standardized dataset sample counts.
+  - log_trial_start     : Emits standardized trial section headers to console/log.
+  - BOKeTEFormatter     : Custom logging formatter that handles clean blank lines.
+  - flatten_dict        : Flattens nested dictionary keys into dot-notation strings.
+  - get_nested_key      : Safely retrieves a value from a nested dictionary by key path.
+  - set_nested_key      : Updates a value deep inside a nested dictionary by key path.
 """
 
+from dataclasses import fields, is_dataclass
 from datetime import datetime
 import logging
 import os
 import random
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Type, TypeVar
 
 import numpy as np
 import torch
@@ -53,23 +66,23 @@ def determine_device(verbose: bool = True) -> torch.device:
 
 
 def load_config(config_path: str | Path) -> Dict[str, Any]:
-    """Loads a YAML or JSON configuration file into a dictionary and logs the event."""
+    """Loads a YAML configuration file into a dictionary and logs the event."""
     path = Path(config_path)
     if not path.exists():
         raise FileNotFoundError(f"Configuration file not found at: {path}")
+
+    if path.suffix.lower() not in (".yaml", ".yml"):
+        raise ValueError(
+            f"Unsupported configuration file extension '{path.suffix}'. Only .yaml and .yml files are supported."
+        )
 
     logger.info("")
     logger.info(f"[BOKeTE] Loading configuration from: {path}")
 
     with open(path, "r", encoding="utf-8") as f:
-        if path.suffix.lower() in (".yaml", ".yml"):
-            import yaml
-            return yaml.safe_load(f) or {}
-        elif path.suffix.lower() == ".json":
-            import json
-            return json.load(f)
-        else:
-            raise ValueError(f"Unsupported configuration file extension: {path.suffix}")
+        import yaml
+
+        return yaml.safe_load(f) or {}
 
 
 def log_dataset_info(
@@ -147,9 +160,53 @@ def flatten_dict(d: Dict[str, Any], parent_key: str = "") -> Dict[str, Any]:
     return dict(items)
 
 
+def get_nested_key(d: Dict[str, Any], key_path: str, default: Any = None) -> Any:
+    """Safely retrieves a value from a nested dictionary using a dot-notation path (e.g., 'training.lr').
+
+    Handles missing keys, non-dict intermediate values, and explicit None entries without raising exceptions.
+    """
+    keys = key_path.split(".")
+    curr: Any = d
+    for k in keys:
+        if not isinstance(curr, dict) or k not in curr:
+            return default
+        curr = curr[k]
+    return curr if curr is not None else default
+
+
 def set_nested_key(d: Dict[str, Any], key_path: str, value: Any) -> None:
     """Sets a value in a nested dictionary using a dot-notation path (e.g., 'training.lr')."""
     parts = key_path.split(".")
     for part in parts[:-1]:
         d = d.setdefault(part, {})
     d[parts[-1]] = value
+
+
+T = TypeVar("T")
+
+
+def load_config_as(config_path: str | Path, dataclass_cls: Type[T]) -> T:
+    """Loads a YAML configuration file directly into a user-defined @dataclass instance.
+
+    Recursively converts nested dictionaries into nested dataclass instances where applicable.
+    Unspecified fields automatically retain their dataclass default values.
+    """
+    raw = load_config(config_path)
+
+    def _from_dict(cls: Type[Any], data: Dict[str, Any]) -> Any:
+        if not is_dataclass(cls) or not isinstance(data, dict):
+            return data
+
+        field_types = {f.name: f.type for f in fields(cls)}
+        kwargs = {}
+        for f in fields(cls):
+            if f.name in data and data[f.name] is not None:
+                val = data[f.name]
+                target_type = field_types[f.name]
+                if is_dataclass(target_type) and isinstance(val, dict):
+                    kwargs[f.name] = _from_dict(target_type, val)
+                else:
+                    kwargs[f.name] = val
+        return cls(**kwargs)
+
+    return _from_dict(dataclass_cls, raw or {})

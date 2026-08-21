@@ -1,5 +1,9 @@
 """
-Orchestration of multiple experiments, multi-trial runs, and parameter sweeps.
+Orchestration of hyperparameter sweeps and multi-trial experimental runs.
+
+Key Functions:
+  - run_experiments: Generates parameter grid combinations and executes run_fn for each.
+  - run_trials     : Executes a single experiment configuration across multiple random seed trials.
 """
 
 import copy

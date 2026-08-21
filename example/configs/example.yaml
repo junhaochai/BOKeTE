@@ -1,0 +1,15 @@
+experiment_name: "mnist_mlp_demo"
+seed: 42
+
+data:
+  batch_size: 64
+  val_batch_size: 1000
+
+model:
+  hidden_dim: 128
+  num_classes: 10
+
+training:
+  epochs: 5
+  lr: 0.001
+  patience: 3

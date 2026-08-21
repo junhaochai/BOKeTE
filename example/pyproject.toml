@@ -1,0 +1,14 @@
+[project]
+name = "bokete-starter"
+version = "0.1.0"
+description = "BoKeTE ML Experiment Starter Project"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "bokete",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

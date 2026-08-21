@@ -14,6 +14,7 @@ from bokete import (
     Checkpoint,
     EarlyStopping,
     Trainer,
+    TrainingMetrics,
     determine_device,
     experiment_report,
     multi_trial_report,
@@ -91,17 +92,65 @@ class TestBokete(unittest.TestCase):
         self.assertIn("Convergence Speed", md)
         self.assertIn("graph_1.png", md)
 
+    def test_experiment_report_with_metrics_object(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config = {'lr': 0.001, 'batch_size': 16}
+            history = TrainingMetrics(
+                train_loss=[0.9, 0.5, 0.2],
+                val_loss=[0.95, 0.6, 0.3],
+                best_epoch=3,
+                best_val_loss=0.3,
+            )
+            graph_path = str(Path(tmp_dir) / "graph_clean.png")
+
+            md = experiment_report(
+                config=config,
+                metrics=history,
+                graph_filename=graph_path,
+                title="Simplified Training Run"
+            )
+
+            self.assertIn("# Simplified Training Run", md)
+            self.assertIn("Final Train Loss", md)
+            self.assertIn("`0.2`", md)
+            self.assertTrue(Path(graph_path).exists())
+
+    def test_plot_loss_curves_with_metrics_object(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            history = TrainingMetrics(
+                train_loss=[0.8, 0.4],
+                val_loss=[0.85, 0.45],
+                best_epoch=2,
+            )
+            graph_path = str(Path(tmp_dir) / "curves.png")
+            plot_loss_curves(history, path=graph_path)
+            self.assertTrue(Path(graph_path).exists())
+
+    def test_experiment_report_with_save_path(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config = {'lr': 0.001}
+            history = TrainingMetrics(train_loss=[0.5], val_loss=[0.6])
+            save_file = Path(tmp_dir) / "subfolder" / "report.md"
+
+            md = experiment_report(config=config, metrics=history, save_path=str(save_file))
+            self.assertTrue(save_file.exists())
+            self.assertEqual(save_file.read_text(encoding="utf-8"), md)
+
     def test_multi_trial_report(self):
         config = {"experiment_name": "quick_test", "dataset": "mixed", "lr": 0.001}
         all_metrics = [
             {"train_loss": [0.9, 0.5, 0.2], "val_loss": [0.95, 0.6, 0.3]},
             {"train_loss": [0.8, 0.4, 0.15], "val_loss": [0.9, 0.5, 0.25]},
         ]
-        summary_md = multi_trial_report(config, all_metrics)
-        self.assertIn("# Multi-Trial Experiment Summary: quick_test", summary_md)
-        self.assertIn("- **Experiment Name:** `quick_test`", summary_md)
-        self.assertIn("Mean Best Validation Loss:", summary_md)
-        self.assertIn("Trial 1", summary_md)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            save_file = Path(tmp_dir) / "summary.md"
+            summary_md = multi_trial_report(config, all_metrics, save_path=str(save_file))
+            self.assertIn("# Multi-Trial Experiment Summary: quick_test", summary_md)
+            self.assertIn("- **Experiment Name:** `quick_test`", summary_md)
+            self.assertIn("Mean Best Validation Loss:", summary_md)
+            self.assertIn("Trial 1", summary_md)
+            self.assertTrue(save_file.exists())
+            self.assertEqual(save_file.read_text(encoding="utf-8"), summary_md)
 
     def test_trainer_fit(self):
         x = torch.randn(20, 4)
@@ -117,6 +166,93 @@ class TestBokete(unittest.TestCase):
 
         self.assertEqual(len(metrics.train_loss), 2)
         self.assertEqual(len(metrics.val_loss), 2)
+
+    def test_trainer_evaluate(self):
+        x = torch.randn(20, 4)
+        y = torch.randint(0, 2, (20,))
+        loader = DataLoader(TensorDataset(x, y), batch_size=5)
+
+        model = nn.Linear(4, 2)
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+        criterion = nn.CrossEntropyLoss()
+
+        trainer = Trainer(model, criterion, optimizer)
+        loss = trainer.evaluate(loader)
+        self.assertIsInstance(loss, float)
+
+    def test_trainer_fit_with_callbacks_list(self):
+        x = torch.randn(20, 4)
+        y = torch.randint(0, 2, (20,))
+        loader = DataLoader(TensorDataset(x, y), batch_size=5)
+
+        model = nn.Linear(4, 2)
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+        criterion = nn.CrossEntropyLoss()
+        early_stop = EarlyStopping(patience=10)
+
+        trainer = Trainer(model, criterion, optimizer)
+        metrics = trainer.fit(loader, loader, epochs=2, callbacks=[early_stop], progress=False)
+        self.assertEqual(len(metrics.train_loss), 2)
+
+    def test_trainer_train_epoch(self):
+        x = torch.randn(20, 4)
+        y = torch.randint(0, 2, (20,))
+        loader = DataLoader(TensorDataset(x, y), batch_size=5)
+
+        model = nn.Linear(4, 2)
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+        criterion = nn.CrossEntropyLoss()
+
+        trainer = Trainer(model, criterion, optimizer)
+        loss = trainer._train_epoch(loader)
+        self.assertIsInstance(loss, float)
+
+    def test_example_run(self):
+        import runpy
+        import sys
+        from pathlib import Path
+        project_root = str(Path(__file__).resolve().parent.parent)
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+
+        res = runpy.run_path("example/main.py")
+        self.assertIsNotNone(res)
+
+    def test_get_nested_key(self):
+        from bokete import get_nested_key
+
+        cfg = {
+            "experiment_name": "test_exp",
+            "training": {"lr": 0.001, "empty": None},
+            "missing_dict": None,
+        }
+
+        self.assertEqual(get_nested_key(cfg, "experiment_name"), "test_exp")
+        self.assertEqual(get_nested_key(cfg, "training.lr"), 0.001)
+        self.assertEqual(get_nested_key(cfg, "training.epochs", default=10), 10)
+        self.assertEqual(get_nested_key(cfg, "training.empty", default=5), 5)
+        self.assertEqual(get_nested_key(cfg, "missing_dict.lr", default=0.01), 0.01)
+        self.assertEqual(get_nested_key(cfg, "nonexistent.path", default="fallback"), "fallback")
+
+    def test_load_config_as(self):
+        from dataclasses import dataclass, field
+        from bokete import load_config_as
+
+        @dataclass
+        class SubConfig:
+            lr: float = 1e-3
+            epochs: int = 10
+
+        @dataclass
+        class RootConfig:
+            experiment_name: str = "default_exp"
+            sub: SubConfig = field(default_factory=SubConfig)
+
+        config_path = Path("example/configs/example.yaml")
+        if config_path.exists():
+            parsed = load_config_as(config_path, RootConfig)
+            self.assertIsInstance(parsed, RootConfig)
+            self.assertIsInstance(parsed.sub, SubConfig)
 
 
 if __name__ == '__main__':

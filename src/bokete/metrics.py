@@ -1,5 +1,9 @@
 """
-Metric tracking for training runs: the History record and summary statistics
+Metric tracking and summary statistics for training runs.
+
+Key Classes & Functions:
+  - TrainingMetrics: Dataclass recording per-epoch loss history and run status.
+  - training_report: Computes summary statistics (best epoch, final loss, delta) from metrics.
 """
 
 from dataclasses import dataclass, field

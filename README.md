@@ -26,13 +26,11 @@ A minimal PyTorch training and experimentation helper library for my personal us
 
 - [1. Public API Summary](#1-public-api-summary)
 - [2. Installation](#2-installation)
-- [3. Core Modules & API Reference](#3-core-modules--api-reference)
-  - [3.1 Training & Checkpointing (`bokete.training`)](#31-training--checkpointing-boketetraining)
-  - [3.2 Metric Tracking & Summaries (`bokete.metrics`)](#32-metric-tracking--summaries-boketemetrics)
-  - [3.3 Loss Curve Plotting (`bokete.plotting`)](#33-loss-curve-plotting-boketeplotting)
-  - [3.4 Markdown Experiment Reporting (`bokete.reporting`)](#34-markdown-experiment-reporting-boketereporting)
-  - [3.5 Hyperparameter Sweeps (`bokete.experiments`)](#35-hyperparameter-sweeps-boketeexperiments)
-- [4. Usage Example](#4-usage-example)
+- [3. Complete Usage Example](#3-complete-usage-example)
+- [4. Advanced Workflows & Feature Reference](#4-advanced-workflows--feature-reference)
+  - [4.1 Loss Curve Plotting (`bokete.plotting`)](#41-loss-curve-plotting-boketeplotting)
+  - [4.2 Multi-Trial Execution & Sweeps (`bokete.experiments`)](#42-multi-trial-execution--sweeps-boketeexperiments)
+  - [4.3 Configuration & Directory Utilities (`bokete.utils`)](#43-configuration--directory-utilities-boketeutils)
 - [5. Project Architecture](#5-project-architecture)
 
 ---
@@ -43,6 +41,7 @@ All core primitives are exported at the root package level (`from bokete import 
 
 | Function / Class | Module | Description |
 | :--- | :--- | :--- |
+| `load_config(config_path)` | `bokete.utils` | Loads a `.yaml`, `.yml`, or `.json` file into a dictionary with standardized logging. |
 | `set_seed(seed, deterministic=False)` | `bokete.training` | Seeds Python, NumPy, and PyTorch (CPU/CUDA) for reproducibility. |
 | `determine_device()` | `bokete.training` | Detects best available hardware device (`cuda`, `mps`, or `cpu`). |
 | `Trainer(...)` | `bokete.training` | Main training loop wrapper with AMP mixed-precision, auto-cuDNN benchmarking & gradient clipping. |
@@ -89,98 +88,135 @@ uv pip install -e .
 
 ---
 
-## 3. Core Modules & API Reference
+## 3. Complete Usage Example
 
-### 3.1 Training & Checkpointing (`bokete.training`)
-Provides the core training loop wrapper (`Trainer`), early stopping logic (`EarlyStopping`), model checkpointing (`Checkpoint`), and hardware device detection (`determine_device`).
+`bokete` is designed to pair seamlessly with structured YAML configuration files. Below is a complete, real-world example combining a YAML config template and a PyTorch training pipeline:
+
+### 3.1 Recommended Configuration Template (`configs/config.yaml`)
+
+```yaml
+# ==============================================================================
+# Experiment Configuration (configs/config.yaml)
+# ==============================================================================
+
+# Global Execution Settings
+experiment_name: "baseline_classification_v1"
+seed: 42
+device: null           # Hardware target: "cuda", "cpu", or null (auto-detect)
+
+# Dataset Configuration
+dataset:
+  name: "CIFAR10"
+  prop_train: 0.8
+
+# Architecture & Layer Configuration
+model:
+  arch: "mlp"
+  num_layers: 4
+  hidden_features: 128
+  out_features: 10
+
+# Training Hyperparameters & Features
+training:
+  epochs: 20
+  batch_size: 32
+  optimizer: "Adam"
+  lr: 0.001
+  amp: false                     # Mixed precision (FP16 on CUDA)
+  max_grad_norm: null            # L2 gradient clipping threshold
+  early_stopping_patience: 10   # Stop if val loss stalls
+  save_checkpoints: true         # Save best.pt and last.pt weights
+```
+
+### 3.2 PyTorch Pipeline Integration (`train.py`)
 
 ```python
-from bokete import Trainer, EarlyStopping, Checkpoint, determine_device, set_seed
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+import bokete
 
-# Reproducibility & Hardware setup
-set_seed(42)
-device = determine_device()
+# 1. Load YAML Config & Setup Environment
+config = bokete.load_config("configs/config.yaml")
+t_cfg = config.get("training", {})
 
-# Setup callbacks
-early_stop = EarlyStopping(patience=10, min_delta=1e-4)
-checkpoint = Checkpoint(directory="checkpoints")
+bokete.set_seed(config.get("seed", 42))
+device = config.get("device") or bokete.determine_device()
 
-# Initialise and execute training loop
-trainer = Trainer(model, criterion, optimizer, device=device, amp=True)
-metrics = trainer.fit(
-    train_loader, 
-    val_loader, 
-    epochs=50, 
-    early_stopping=early_stop,
-    checkpoint=checkpoint
+# 2. Setup Model, Loss, Optimizer & Callbacks
+model = MyNeuralNetwork().to(device)
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=t_cfg.get("lr", 1e-3))
+
+callbacks = []
+if t_cfg.get("early_stopping_patience"):
+    callbacks.append(bokete.EarlyStopping(patience=t_cfg["early_stopping_patience"]))
+if t_cfg.get("save_checkpoints"):
+    callbacks.append(bokete.Checkpoint(directory="checkpoints"))
+
+# 3. Train Model via Trainer Wrapper
+trainer = bokete.Trainer(
+    model=model, 
+    criterion=criterion, 
+    optimizer=optimizer, 
+    device=device, 
+    amp=t_cfg.get("amp", False),
+    max_grad_norm=t_cfg.get("max_grad_norm")
+)
+
+history = trainer.fit(
+    train_loader=train_loader, 
+    val_loader=val_loader, 
+    epochs=t_cfg.get("epochs", 20), 
+    callbacks=callbacks
+)
+
+# 4. Generate & Save Markdown Report (Auto-embeds YAML table & loss curves!)
+bokete.experiment_report(
+    config=config,
+    metrics=history,
+    save_path="results/report.md",
+    title="Minimal Training Run"
 )
 ```
 
-### 3.2 Metric Tracking & Summaries (`bokete.metrics`)
-Aggregates running loss metrics per epoch and generates structured summary statistics (final losses, mean losses, best epoch).
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+---
+
+## 4. Advanced Workflows & Feature Reference
+
+### 4.1 Loss Curve Plotting (`bokete.plotting`)
+Renders publication-ready training and validation loss curves using Matplotlib with annotated best-epoch markers, alongside a companion interactive Chart.js HTML file. Accepts a `TrainingMetrics` instance directly or raw loss lists.
 
 ```python
-from bokete import TrainingMetrics, training_report
+import bokete
 
-# Compute summary stats from training history dictionary
-summary = training_report(eval_metrics)
-# Returns: {'final_train_loss': 0.12, 'final_val_loss': 0.18, 'mean_train_loss': ..., 'best_epoch': 34}
+# Pass the TrainingMetrics object directly!
+bokete.plot_loss_curves(metrics=history, path="results/graph.png")
 ```
 
-### 3.3 Loss Curve Plotting (`bokete.plotting`)
-Renders publication-ready training and validation loss curves using Matplotlib with annotated best-epoch markers, alongside a companion interactive Chart.js HTML file.
-
-```python
-from bokete import plot_loss_curves
-
-plot_loss_curves(
-    train_loss=eval_metrics['train_loss'],
-    val_loss=eval_metrics['val_loss'],
-    path="results/graph.png",
-    best_epoch=summary['best_epoch']
-)
-```
-
-### 3.4 Markdown Experiment Reporting (`bokete.reporting`)
-Generates structured, self-contained GitHub-Flavoured Markdown (`.md`) reports containing trial overviews, key hyperparameter highlights, loss graph embeds, custom evaluation metrics, and multi-trial statistical summaries ($\text{Mean} \pm \text{Std}$, $\text{Min}$, $\text{Max}$).
-
-```python
-from bokete import experiment_report, multi_trial_report
-
-# 1. Single Trial Report
-md_report = experiment_report(
-    config=config_dict,
-    metrics_summary=summary,
-    train_loss=eval_metrics['train_loss'],
-    val_loss=eval_metrics['val_loss'],
-    graph_filename="graph.png",
-    title="Trial 1 Report [mixed_r0.1_s0.1]",
-    extra_metrics={"Convergence Speed": 0.2145}
-)
-
-with open("result.md", "w", encoding="utf-8") as f:
-    f.write(md_report)
-
-# 2. Multi-Trial Combined Summary Report
-summary_md = multi_trial_report(
-    config=config_dict,
-    all_trial_metrics=[metrics_trial_1, metrics_trial_2, metrics_trial_3]
-)
-
-with open("summary-report.md", "w", encoding="utf-8") as f:
-    f.write(summary_md)
-```
-
-### 3.5 Multi-Trial Execution & Sweeps (`bokete.experiments`)
+### 4.2 Multi-Trial Execution & Sweeps (`bokete.experiments`)
 Orchestrates multi-trial runs and parameter sweeps over a grid of configuration paths without bleeding state across runs.
+
+#### Multi-Trial Summary Report (`multi_trial_report`)
+```python
+import bokete
+
+summary_md = bokete.multi_trial_report(
+    config=config_dict,
+    all_trial_metrics=[metrics_trial_1, metrics_trial_2, metrics_trial_3],
+    save_path="summary-report.md"
+)
+```
 
 #### Multi-Trial Orchestration (`run_trials`)
 Runs a single configuration across multiple trials with clean console logging, graceful `Ctrl+C` cancellation, and auto-generation of `summary-report.md`:
 
 ```python
-from bokete import run_trials
+import bokete
 
-all_trial_metrics = run_trials(
+all_trial_metrics = bokete.run_trials(
     config=config,
     num_trials=3,
     run_fn=lambda trial_num, cfg: train_single_trial(cfg, trial_num),
@@ -192,74 +228,34 @@ all_trial_metrics = run_trials(
 Executes parameter combinations across a configuration grid:
 
 ```python
-from bokete import run_experiments
+import bokete
 
 param_grid = {
     "training.lr": [0.001, 0.0001],
     "training.batch_size": [8, 16]
 }
 
-results = run_experiments(
+results = bokete.run_experiments(
     base_config=config,
     param_grid=param_grid,
     run_fn=train_and_eval_callback
 )
 ```
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
----
-
-## 4. Usage Example
-
-Here is a complete, minimal example combining `bokete` helpers inside a standard PyTorch pipeline:
+### 4.3 Configuration & Directory Utilities (`bokete.utils`)
+Provides configuration loading (`load_config`), experiment run directory creation (`create_run_directory`), and nested key dictionary utilities (`flatten_dict`, `set_nested_key`).
 
 ```python
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
-from bokete import (
-    determine_device, 
-    set_seed, 
-    Trainer, 
-    training_report, 
-    plot_loss_curves, 
-    experiment_report
-)
+import bokete
 
-# 1. Setup Environment
-set_seed(42)
-device = determine_device()
+# 1. Load YAML or JSON configuration file into a dictionary
+config = bokete.load_config("configs/config.yaml")
 
-# 2. Model, Loss, Optimizer
-model = MyNeuralNetwork().to(device)
-criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+# 2. Programmatically override nested configuration keys using dot notation
+bokete.set_nested_key(config, "training.lr", 0.0005)
 
-# 3. Train using Trainer wrapper
-trainer = Trainer(model, criterion, optimizer, device=device)
-history = trainer.fit(train_loader, val_loader, epochs=20)
-
-# 4. Generate Reports & Visualisations
-summary = training_report(history.as_dict())
-plot_loss_curves(
-    train_loss=history.train_loss,
-    val_loss=history.val_loss,
-    path="graph.png",
-    best_epoch=summary['best_epoch']
-)
-
-md = experiment_report(
-    config={"lr": 1e-3, "epochs": 20},
-    metrics_summary=summary,
-    train_loss=history.train_loss,
-    val_loss=history.val_loss,
-    graph_filename="graph.png",
-    title="Minimal Training Run"
-)
-
-with open("result.md", "w", encoding="utf-8") as f:
-    f.write(md)
+# 3. Create a timestamped experiment output directory (e.g. results/exp_name/YYYYMMDD-01)
+run_dir = bokete.create_run_directory(base_dir="results", experiment_name=config.get("experiment_name"))
 ```
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>

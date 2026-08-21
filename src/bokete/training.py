@@ -1,12 +1,17 @@
 """
-Core training machinery: the train() loop, evaluation, early stopping,
-checkpointing, and seeding/device utilities
+Core training machinery for bokete.
+
+Key Classes & Functions:
+  - Trainer      : Main training loop engine handling fit(), epochs, AMP, and callback hooks.
+  - EarlyStopping: Callback for halting training when validation loss stops improving.
+  - Checkpoint   : Callback for saving best.pt and last.pt model state dictionaries.
+  - evaluate     : Computes evaluation loss over a DataLoader without tracking gradients.
 """
 
 import os
 import random
 from pathlib import Path
-from typing import Callable, Optional, Any
+from typing import Callable, Optional, Any, List
 
 import logging
 import numpy as np
@@ -144,12 +149,66 @@ class Trainer:
         self._last_spatial_shape = None
         self._variable_shapes_detected = False
 
+    def evaluate(self, loader: DataLoader) -> float:
+        """Compute the mean loss of `model` over `loader` using Trainer configuration."""
+        return evaluate(
+            self.model,
+            loader,
+            self.criterion,
+            device=self.device,
+            prepare_batch=self.prepare_batch,
+            amp_active=self.amp_active,
+        )
+
+    def _train_epoch(self, train_loader: DataLoader, max_batches: Optional[int] = None) -> float:
+        """Run one training epoch over `train_loader` and return the mean training loss."""
+        self.model.train()
+        running_loss = 0.0
+        batches_run = 0
+
+        for batch in train_loader:
+            if max_batches is not None and batches_run >= max_batches:
+                break
+
+            inputs, targets = self.prepare_batch(batch, self.device)
+
+            # Auto-detect spatial shape consistency for cuDNN benchmarking
+            if self.device.type == 'cuda' and not self._variable_shapes_detected:
+                spatial_shape = tuple(inputs.shape[1:])
+                if self._last_spatial_shape is None:
+                    self._last_spatial_shape = spatial_shape
+                    torch.backends.cudnn.benchmark = True
+                elif spatial_shape != self._last_spatial_shape:
+                    self._variable_shapes_detected = True
+                    torch.backends.cudnn.benchmark = False
+
+            self.optimizer.zero_grad()
+
+            with torch.autocast(device_type=self.device.type, enabled=self.amp_active):
+                outputs = self.model(inputs)
+                loss = self.criterion(outputs, targets)
+
+            self.scaler.scale(loss).backward()
+            if self.max_grad_norm is not None:
+                # Gradients must be unscaled before clipping, otherwise the
+                # threshold would apply to AMP-scaled values.
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+
+            running_loss += loss.item()
+            batches_run += 1
+
+        return round(running_loss / max(batches_run, 1), 4)
+
     def fit(
         self,
         train_loader: DataLoader,
         val_loader: DataLoader,
         epochs: int,
         *,
+        callbacks: Optional[List[Any]] = None,
         scheduler: Optional[Any] = None,
         early_stopping: Optional[EarlyStopping] = None,
         checkpoint: Optional[Checkpoint] = None,
@@ -162,6 +221,7 @@ class Trainer:
             train_loader (DataLoader): DataLoader for the training phase.
             val_loader (DataLoader): DataLoader for the validation phase.
             epochs (int): Maximum number of epochs to run.
+            callbacks (list, optional): List of callback objects (e.g. EarlyStopping, Checkpoint, Schedulers).
             scheduler (optional): Learning rate scheduler; `.step()` is called once per epoch.
             early_stopping (EarlyStopping, optional): EarlyStopping instance.
             checkpoint (Checkpoint, optional): Checkpoint instance.
@@ -175,54 +235,22 @@ class Trainer:
         self._last_spatial_shape = None
         self._variable_shapes_detected = False
 
+        # Consolidate callbacks from list and legacy keyword arguments
+        all_callbacks = list(callbacks or [])
+        if early_stopping and early_stopping not in all_callbacks:
+            all_callbacks.append(early_stopping)
+        if checkpoint and checkpoint not in all_callbacks:
+            all_callbacks.append(checkpoint)
+        if scheduler and scheduler not in all_callbacks:
+            all_callbacks.append(scheduler)
+
         try:
             with tqdm.tqdm(range(epochs), desc=" Epochs", dynamic_ncols=True, leave=False, disable=not progress) as pbar:
                 for epoch in pbar:
-                    self.model.train()
-                    running_loss = 0.0
-                    batches_run = 0
-
-                    for batch in train_loader:
-                        if max_train_batches is not None and batches_run >= max_train_batches:
-                            break
-
-                        inputs, targets = self.prepare_batch(batch, self.device)
-
-                        # Auto-detect spatial shape consistency for cuDNN benchmarking
-                        if self.device.type == 'cuda' and not self._variable_shapes_detected:
-                            spatial_shape = tuple(inputs.shape[1:])
-                            if self._last_spatial_shape is None:
-                                self._last_spatial_shape = spatial_shape
-                                torch.backends.cudnn.benchmark = True
-                            elif spatial_shape != self._last_spatial_shape:
-                                self._variable_shapes_detected = True
-                                torch.backends.cudnn.benchmark = False
-
-                        self.optimizer.zero_grad()
-
-                        with torch.autocast(device_type=self.device.type, enabled=self.amp_active):
-                            outputs = self.model(inputs)
-                            loss = self.criterion(outputs, targets)
-
-                        self.scaler.scale(loss).backward()
-                        if self.max_grad_norm is not None:
-                            # Gradients must be unscaled before clipping, otherwise the
-                            # threshold would apply to AMP-scaled values.
-                            self.scaler.unscale_(self.optimizer)
-                            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-                        self.scaler.step(self.optimizer)
-                        self.scaler.update()
-
-                        running_loss += loss.item()
-                        batches_run += 1
-
-                    # Mean over batches actually run, not len(train_loader)
-                    train_loss = round(running_loss / max(batches_run, 1), 4)
+                    train_loss = self._train_epoch(train_loader, max_train_batches)
                     metrics.train_loss.append(train_loss)
 
-                    val_loss = round(evaluate(self.model, val_loader, self.criterion,
-                                              device=self.device, prepare_batch=self.prepare_batch,
-                                              amp_active=self.amp_active), 4)
+                    val_loss = round(self.evaluate(val_loader), 4)
                     metrics.val_loss.append(val_loss)
                     pbar.set_postfix(train_loss=f"{train_loss:.4f}", val_loss=f"{val_loss:.4f}")
 
@@ -230,17 +258,25 @@ class Trainer:
                         metrics.best_val_loss = val_loss
                         metrics.best_epoch = epoch + 1
 
-                    if scheduler is not None:
-                        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                            if val_loss is not None:
-                                scheduler.step(val_loss)
-                        else:
-                            scheduler.step()
+                    # Process callbacks at end of epoch
+                    stop_training = False
+                    for cb in all_callbacks:
+                        if hasattr(cb, 'on_epoch_end'):
+                            res = cb.on_epoch_end(self, epoch + 1, val_loss)
+                            if res is True:
+                                stop_training = True
+                        elif isinstance(cb, EarlyStopping):
+                            if cb.step(val_loss):
+                                stop_training = True
+                        elif isinstance(cb, Checkpoint):
+                            cb.update(self.model, epoch + 1, val_loss, optimizer=self.optimizer)
+                        elif hasattr(cb, 'step'):
+                            if isinstance(cb, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                                cb.step(val_loss)
+                            else:
+                                cb.step()
 
-                    if checkpoint is not None:
-                        checkpoint.update(self.model, epoch + 1, val_loss, optimizer=self.optimizer)
-
-                    if early_stopping is not None and early_stopping.step(val_loss):
+                    if stop_training:
                         metrics.stopped_early = True
                         break
         except KeyboardInterrupt:
