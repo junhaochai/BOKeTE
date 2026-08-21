@@ -124,19 +124,21 @@ class TestReporting(unittest.TestCase):
         )
         config = {"experiment_name": "model_test", "lr": 0.01}
         metrics = TrainingMetrics(train_loss=[0.5, 0.2], val_loss=[0.6, 0.3])
-        report_md = experiment_report(
-            config=config,
-            metrics=metrics,
-            model=model,
-            title="Model Logging Report",
-        )
-        self.assertIn("## Model Architecture", report_md)
-        self.assertIn("- **Model Class:** `Sequential`", report_md)
-        self.assertIn("Sequential", report_md)
-        self.assertIn("View Model Layer Hierarchy", report_md)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            report_md = experiment_report(
+                config=config,
+                metrics=metrics,
+                model=model,
+                save_path=tmp_dir,
+                title="Model Logging Report",
+            )
+            self.assertIn("## Model Architecture", report_md)
+            self.assertIn("- **Model Class:** `Sequential`", report_md)
+            self.assertIn("Sequential", report_md)
+            self.assertIn("View Model Layer Hierarchy", report_md)
 
     def test_experiment_report_timing_and_gpu(self):
-        config = {'lr': 0.001, 'batch_size': 16}
+        config = {'experiment_name': 'timing_exp', 'lr': 0.001, 'batch_size': 16}
         metrics_summary = {
             'final_train_loss': 0.2,
             'final_val_loss': 0.3,
@@ -151,18 +153,20 @@ class TestReporting(unittest.TestCase):
         train_loss = [0.9, 0.2]
         val_loss = [0.95, 0.3]
 
-        md = experiment_report(
-            config=config,
-            metrics_summary=metrics_summary,
-            train_loss=train_loss,
-            val_loss=val_loss,
-            graph_filename="graph_timing.png",
-        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            md = experiment_report(
+                config=config,
+                metrics_summary=metrics_summary,
+                train_loss=train_loss,
+                val_loss=val_loss,
+                save_path=tmp_dir,
+                graph_filename="graph_timing.png",
+            )
 
-        self.assertIn("- **Start Date:** `2026-08-12 12:00:00`", md)
-        self.assertIn("- **End Date:** `2026-08-12 12:02:15`", md)
-        self.assertIn("- **Time Taken:** `02m 15s` (`135.00s`)", md)
-        self.assertIn("- **Execution Device:** `cuda:0 (NVIDIA GeForce RTX 4090)`", md)
+            self.assertIn("- **Start Date:** `2026-08-12 12:00:00`", md)
+            self.assertIn("- **End Date:** `2026-08-12 12:02:15`", md)
+            self.assertIn("- **Time Taken:** `02m 15s` (`135.00s`)", md)
+            self.assertIn("- **Execution Device:** `cuda:0 (NVIDIA GeForce RTX 4090)`", md)
 
     def test_multi_trial_report_timing_and_gpu(self):
         config = {"experiment_name": "timing_test", "dataset": "mixed", "lr": 0.001}
@@ -170,17 +174,19 @@ class TestReporting(unittest.TestCase):
             {"train_loss": [0.9, 0.2], "val_loss": [0.95, 0.3]},
             {"train_loss": [0.8, 0.15], "val_loss": [0.9, 0.25]},
         ]
-        summary_md = multi_trial_report(
-            config,
-            all_metrics,
-            start_time='2026-08-12 12:00:00',
-            end_time='2026-08-12 12:05:00',
-            duration_seconds=300.0,
-        )
-        self.assertIn("- **Start Date:** `2026-08-12 12:00:00`", summary_md)
-        self.assertIn("- **End Date:** `2026-08-12 12:05:00`", summary_md)
-        self.assertIn("- **Total Time Taken:** `05m 00s` (`300.00s`)", summary_md)
-        self.assertIn("- **Execution Device:**", summary_md)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            summary_md = multi_trial_report(
+                config,
+                all_metrics,
+                save_path=tmp_dir,
+                start_time='2026-08-12 12:00:00',
+                end_time='2026-08-12 12:05:00',
+                duration_seconds=300.0,
+            )
+            self.assertIn("- **Start Date:** `2026-08-12 12:00:00`", summary_md)
+            self.assertIn("- **End Date:** `2026-08-12 12:05:00`", summary_md)
+            self.assertIn("- **Total Time Taken:** `05m 00s` (`300.00s`)", summary_md)
+            self.assertIn("- **Execution Device:**", summary_md)
 
     def test_multi_trial_report_with_model_and_filename(self):
         model = nn.Sequential(

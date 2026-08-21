@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from bokete.experiments import create_trial_runner, run_experiments, run_trials
+from bokete.experiments import create_trial_runner, run_experiments
 
 
 class TestExperiments(unittest.TestCase):
@@ -22,8 +22,13 @@ class TestExperiments(unittest.TestCase):
         if project_root not in sys.path:
             sys.path.insert(0, project_root)
 
-        res = runpy.run_path("example/main.py")
-        self.assertIsNotNone(res)
+        orig_argv = sys.argv
+        sys.argv = ["main.py", "--config", "example/configs/example.yaml"]
+        try:
+            res = runpy.run_path("example/main.py")
+            self.assertIsNotNone(res)
+        finally:
+            sys.argv = orig_argv
 
     def test_create_trial_runner(self):
         def model_factory(cfg):
@@ -43,13 +48,12 @@ class TestExperiments(unittest.TestCase):
             config = {
                 "experiment_name": "test_runner",
                 "seed": 42,
-                "output_dir": tmpdir,
                 "training": {"epochs": 2, "lr": 0.01, "loss": "MSELoss", "optimizer": "Adam"},
             }
-            metrics = runner(1, config)
+            metrics = runner(1, config, output_dir=tmpdir)
             self.assertIn("train_loss", metrics)
             self.assertIn("val_loss", metrics)
-            self.assertTrue((Path(tmpdir) / "test_runner" / "trial_1" / "report.md").exists())
+            self.assertTrue((Path(tmpdir) / "trial_1" / "report.md").exists())
 
     def test_create_trial_runner_test_fn(self):
         def model_factory(cfg):
@@ -68,15 +72,14 @@ class TestExperiments(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "experiment_name": "test_fn_test",
-                "output_dir": tmpdir,
                 "training": {"epochs": 1, "lr": 0.01, "loss": "MSELoss", "optimizer": "Adam"},
             }
-            res = runner(1, config)
+            res = runner(1, config, output_dir=tmpdir)
             self.assertIn("extra_metrics", res)
             self.assertEqual(res["extra_metrics"]["test_accuracy"], 0.95)
 
     def test_run_experiments(self):
-        base_config = {"training": {"lr": 0.01, "epochs": 1}}
+        base_config = {"experiment_name": "exp_sweep", "training": {"lr": 0.01, "epochs": 1}}
         param_grid = {"training.lr": [0.01, 0.001]}
 
         def dummy_run_fn(config):
@@ -87,6 +90,18 @@ class TestExperiments(unittest.TestCase):
         self.assertEqual(results[0]["parameters"]["training.lr"], 0.01)
         self.assertEqual(results[1]["parameters"]["training.lr"], 0.001)
 
+    def test_run_experiments_nested_list(self):
+        base_config = {"experiment_name": "exp_sweep", "model": {"layer_sizes": [128, 64]}}
+        param_grid = {"model.layer_sizes": [[256, 128], [512, 256, 128]]}
+
+        def dummy_run_fn(config):
+            return {"train_loss": [0.5]}
+
+        results = run_experiments(base_config, param_grid, dummy_run_fn)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]["parameters"]["model.layer_sizes"], [256, 128])
+        self.assertEqual(results[1]["parameters"]["model.layer_sizes"], [512, 256, 128])
+
     def test_run_trials(self):
         config = {"experiment_name": "trial_test", "training": {"epochs": 1}}
 
@@ -94,7 +109,7 @@ class TestExperiments(unittest.TestCase):
             return {"train_loss": [0.5], "val_loss": [0.6]}
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            metrics_list = run_trials(config, num_trials=2, run_fn=dummy_trial_fn, output_dir=tmpdir)
+            metrics_list = run_experiments(config, num_trials=2, run_fn=dummy_trial_fn, output_dir=tmpdir)
             self.assertEqual(len(metrics_list), 2)
             self.assertTrue((Path(tmpdir) / "summary-report.md").exists())
 

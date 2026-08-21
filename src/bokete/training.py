@@ -201,6 +201,7 @@ class Trainer:
             dynamic_ncols=True,
             leave=False,
             disable=not show_progress,
+            mininterval=1.0,
         )
 
         for batch in batch_pbar:
@@ -238,7 +239,7 @@ class Trainer:
             running_loss += loss_val
             batches_run += 1
             avg_loss = running_loss / batches_run
-            batch_pbar.set_postfix(loss=f"{avg_loss:.4f}")
+            batch_pbar.set_postfix(loss=f"{avg_loss:.4f}", refresh=False)
 
         return round(running_loss / max(batches_run, 1), 4)
 
@@ -294,7 +295,7 @@ class Trainer:
             all_callbacks.append(scheduler)
 
         try:
-            with tqdm.tqdm(range(epochs), desc=" Overall Progress", dynamic_ncols=True, leave=True, disable=not progress) as pbar:
+            with tqdm.tqdm(range(epochs), desc=" Overall Progress", dynamic_ncols=True, leave=True, disable=not progress, mininterval=1.0) as pbar:
                 for epoch in pbar:
                     train_loss = self._train_epoch(
                         train_loader,
@@ -307,7 +308,7 @@ class Trainer:
 
                     val_loss = round(self.evaluate(val_loader), 4)
                     metrics.val_loss.append(val_loss)
-                    pbar.set_postfix(train_loss=f"{train_loss:.4f}", val_loss=f"{val_loss:.4f}")
+                    pbar.set_postfix(train_loss=f"{train_loss:.4f}", val_loss=f"{val_loss:.4f}", refresh=False)
 
                     if metrics.best_val_loss is None or val_loss < metrics.best_val_loss:
                         metrics.best_val_loss = val_loss

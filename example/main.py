@@ -16,13 +16,8 @@ from src.schema import ExperimentConfig
 
 
 def main() -> None:
-    # 1. Parse CLI arguments & load configuration YAML
-    cfg = bokete.parse_cli_config(
-        ExperimentConfig,
-        default_config=Path(__file__).parent / "configs" / "example.yaml",
-    )
-
-    run_dir = bokete.create_run_directory(cfg)
+    # 1. Parse CLI arguments & load configuration YAML (forces --config argument)
+    cfg = bokete.parse_cli_config(ExperimentConfig)
 
     # 2. Data Factory Callback
     transform = transforms.Compose([
@@ -54,19 +49,17 @@ def main() -> None:
 
     # 4. Create Standardized Trial Runner via bokete.create_trial_runner
     cfg_dict = asdict(cfg)
-    cfg_dict["output_dir"] = str(run_dir.parent)
 
     runner = bokete.create_trial_runner(
         model_factory=model_factory,
         loader_factory=loader_factory,
     )
 
-    # 5. Execute Multi-Trial Runner via bokete.run_trials
-    bokete.run_trials(
+    # 5. Execute Experiment Run
+    # Primary entry point: automatically runs single-config multi-trial run OR multi-config grid sweep based on YAML
+    bokete.run_experiments(
         config=cfg_dict,
-        num_trials=cfg.trials,
         run_fn=runner,
-        output_dir=str(run_dir),
     )
 
 

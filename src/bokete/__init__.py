@@ -12,6 +12,7 @@ from bokete.training import (
 )
 from bokete.utils import (
     BOKeTEFormatter,
+    close_file_loggers,
     create_run_directory,
     determine_device,
     flatten_dict,
@@ -31,7 +32,6 @@ from bokete.utils import (
 from bokete.experiments import (
     create_trial_runner,
     run_experiments,
-    run_trials,
 )
 from bokete.reporting import experiment_report, multi_trial_report
 
@@ -42,6 +42,7 @@ __all__ = [
     "Checkpoint",
     "EarlyStopping",
     "TrainingMetrics",
+    "close_file_loggers",
     "create_run_directory",
     "create_trial_runner",
     "determine_device",
@@ -65,5 +66,4 @@ __all__ = [
     "training_report",
     "Trainer",
     "run_experiments",
-    "run_trials",
 ]

@@ -197,49 +197,82 @@ bokete.plot_loss_curves(metrics=history, path="results/graph.png")
 ```
 
 ### 4.2 Multi-Trial Execution & Sweeps (`bokete.experiments`)
-Orchestrates multi-trial runs and parameter sweeps over a grid of configuration paths without bleeding state across runs.
-
-#### Multi-Trial Summary Report (`multi_trial_report`)
-```python
-import bokete
-
-summary_md = bokete.multi_trial_report(
-    config=config_dict,
-    all_trial_metrics=[metrics_trial_1, metrics_trial_2, metrics_trial_3],
-    save_path="summary-report.md"
+    save_path="results/report.md"
 )
 ```
 
-#### Multi-Trial Orchestration (`run_trials`)
-Runs a single configuration across multiple trials with clean console logging, graceful `Ctrl+C` cancellation, and auto-generation of `summary-report.md`:
+### Option B: Recommended High-Level Runner (`bokete.run_experiments`)
 
 ```python
 import bokete
 
-all_trial_metrics = bokete.run_trials(
+# 1. Define factory functions
+def model_factory(cfg):
+    return torch.nn.Linear(10, 1)
+
+def loader_factory(cfg):
+    x, y = torch.randn(100, 10), torch.randn(100, 1)
+    ds = TensorDataset(x, y)
+    loader = DataLoader(ds, batch_size=cfg["batch_size"])
+    return loader, loader
+
+# 2. Build automated trial runner
+runner = bokete.create_trial_runner(model_factory, loader_factory)
+
+# 3. Load config and run experiment (auto-detects single config vs grid sweep)
+cfg = bokete.parse_cli_config(MyConfigSchema)
+bokete.run_experiments(config=cfg, run_fn=runner)
+```
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+---
+
+## 4. Feature Reference & Advanced API
+
+### 4.1 Orchestration & Sweeps (`bokete.run_experiments`)
+
+`bokete.run_experiments` is the primary top-level entry point. It automatically detects whether your config contains a `param_grid`:
+
+#### Single-Config Multi-Trial Run
+Runs a single configuration across multiple seed trials with clean console logging, graceful `Ctrl+C` cancellation, and auto-generation of `summary-report.md`:
+
+```python
+import bokete
+
+all_trial_metrics = bokete.run_experiments(
     config=config,
     num_trials=3,
-    run_fn=lambda trial_num, cfg: train_single_trial(cfg, trial_num),
-    output_dir="./results/run_01"
+    run_fn=runner
 )
 ```
 
-#### Grid Search Sweeps (`run_experiments`)
+#### Grid Search Sweeps
 Executes parameter combinations across a configuration grid:
 
 ```python
 import bokete
 
-param_grid = {
-    "training.lr": [0.001, 0.0001],
-    "training.batch_size": [8, 16]
+config = {
+    "experiment_name": "grid_sweep_demo",
+    "trials": 2,
+    "param_grid": {
+        "training.lr": [0.001, 0.0001],
+        "model.hidden_dim": [64, 128],
+    }
 }
 
-results = bokete.run_experiments(
-    base_config=config,
-    param_grid=param_grid,
-    run_fn=train_and_eval_callback
-)
+results = bokete.run_experiments(config=config, run_fn=runner)
+```
+
+### 4.2 Loss Curve Plotting (`bokete.plotting`)
+Renders publication-ready training and validation loss curves using Matplotlib with annotated best-epoch markers, alongside a companion interactive Chart.js HTML file. Accepts a `TrainingMetrics` instance directly or raw loss lists.
+
+```python
+import bokete
+
+# Pass the TrainingMetrics object directly!
+bokete.plot_loss_curves(metrics=history, path="results/graph.png")
 ```
 
 ### 4.3 Configuration & Directory Utilities (`bokete.utils`)

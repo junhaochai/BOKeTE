@@ -109,11 +109,10 @@ class TestUtils(unittest.TestCase):
         @dataclass
         class SampleConfig:
             experiment_name: str = "my_experiment"
-            output_dir: str = ""
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            cfg = SampleConfig(output_dir=tmpdir)
-            run_dir = create_run_directory(cfg, attach_file_logger=False)
+            cfg = SampleConfig()
+            run_dir = create_run_directory(cfg, base_dir=tmpdir, attach_file_logger=False)
             self.assertTrue(run_dir.exists())
             self.assertEqual(run_dir.parent.name, "my_experiment")
 

@@ -21,83 +21,58 @@ import torch
 
 from bokete.reporting import experiment_report, multi_trial_report
 from bokete.training import Trainer, EarlyStopping, Checkpoint
-from bokete.utils import set_seed, determine_device, get_nested_key, set_nested_key, log_trial_start, setup_logging, format_duration
+from bokete.utils import (
+    close_file_loggers,
+    create_run_directory,
+    determine_device,
+    format_duration,
+    get_nested_key,
+    log_trial_start,
+    set_nested_key,
+    set_seed,
+    setup_logging,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def run_experiments(
-    base_config: Dict[str, Any],
-    param_grid: Dict[str, List[Any]],
-    run_fn: Callable[[Dict[str, Any]], Dict[str, Any]]
-) -> List[Dict[str, Any]]:
-    """Generates all combinations of parameters from param_grid, updates base_config,
-    and executes run_fn for each run.
-
-    Args:
-        base_config: The default configuration dictionary.
-        param_grid: Dict mapping config paths (e.g., 'training.lr') to lists of values to test.
-        run_fn: A callback function `(config) -> metrics_dict` that runs a single experiment.
-
-    Returns:
-        A list of results, each containing the parameters used and the returned metrics.
-    """
-    keys = list(param_grid.keys())
-    value_combinations = list(itertools.product(*param_grid.values()))
-
-    results = []
-
-    total = len(value_combinations)
-    for idx, combo in enumerate(value_combinations, 1):
-        # Deep copy to prevent mutations from bleeding into other runs
-        run_config = copy.deepcopy(base_config)
-
-        # Apply the current parameter combination
-        params_used = {}
-        for key, value in zip(keys, combo):
-            set_nested_key(run_config, key, value)
-            params_used[key] = value
-
-        params_str = ", ".join([f"{k}={v}" for k, v in params_used.items()])
-        log_trial_start(idx, total, params_str)
-        metrics = run_fn(run_config)
-
-        results.append({
-            "parameters": params_used,
-            "metrics": metrics
-        })
-
-    return results
-
-
-
-def run_trials(
+def _run_trials(
     config: Dict[str, Any],
     num_trials: int,
-    run_fn: Callable[[int, Dict[str, Any]], Dict[str, Any]],
+    run_fn: Callable[..., Dict[str, Any]],
     output_dir: Optional[str] = None,
     model: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
-    """Runs a single configuration across multiple trials with standardized logging,
-    graceful Ctrl+C cancellation, and optional multi-trial Markdown report generation.
-    """
+    """Internal helper that runs a single configuration across multiple seed trials."""
+    exp_label = config.get("experiment_name") if isinstance(config, dict) else getattr(config, "experiment_name", None)
+    if not exp_label or not str(exp_label).strip():
+        raise ValueError("Configuration must explicitly define 'experiment_name'.")
+
+    if output_dir is None:
+        run_dir_path = create_run_directory(config, attach_file_logger=True)
+        output_dir = str(run_dir_path)
+    else:
+        setup_logging(log_file=Path(output_dir) / "experiment.log")
+
     setup_logging()
     all_metrics = []
-    exp_label = (
-        config.get('experiment_name')
-        or config.get('dataset_name')
-        or config.get('dataset')
-        or "Trial Execution"
-    )
 
     start_dt = datetime.now()
     start_time_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
     t0 = time.time()
 
     try:
+        base_seed = config.get("seed", 42) if isinstance(config, dict) else getattr(config, "seed", 42)
         for i in range(1, num_trials + 1):
-            log_trial_start(i, num_trials, exp_label)
-            metrics = run_fn(i, config)
+            trial_seed = base_seed + (i - 1)
+            log_trial_start(i, num_trials, exp_label, seed=trial_seed)
+            try:
+                metrics = run_fn(i, config, output_dir=output_dir)
+            except TypeError:
+                try:
+                    metrics = run_fn(i, config)
+                except TypeError:
+                    metrics = run_fn(config)
             if metrics:
                 all_metrics.append(metrics)
                 val_losses = metrics.get('val_loss') or []
@@ -110,6 +85,8 @@ def run_trials(
         logger.warning("")
         logger.warning("[BOKeTE] Multi-trial run cancelled by user (KeyboardInterrupt). Finalizing completed trials...")
         logger.warning("")
+    finally:
+        close_file_loggers()
 
     t1 = time.time()
     end_dt = datetime.now()
@@ -146,6 +123,81 @@ def run_trials(
     return all_metrics
 
 
+def run_experiments(
+    config: Optional[Dict[str, Any]] = None,
+    run_fn: Optional[Callable[..., Dict[str, Any]]] = None,
+    num_trials: Optional[int] = None,
+    output_dir: Optional[str] = None,
+    model: Optional[Any] = None,
+    base_config: Optional[Dict[str, Any]] = None,
+    param_grid: Optional[Dict[str, List[Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """Primary top-level entry point to execute an experiment run.
+
+    Automatically detects whether to perform a multi-config hyperparameter sweep (if param_grid
+    is present in config or arguments) or a single-config multi-trial run.
+    """
+    # Support legacy positional signature: run_experiments(base_config, param_grid, run_fn)
+    if isinstance(run_fn, dict) and param_grid is None:
+        param_grid = run_fn
+        run_fn = num_trials  # type: ignore
+        num_trials = None
+
+    target_config = config if config is not None else base_config
+    if target_config is None:
+        raise ValueError("A configuration dictionary must be provided to run_experiments().")
+
+    grid = param_grid
+    if grid is None and isinstance(target_config, dict):
+        grid = target_config.get("param_grid")
+    elif grid is None and is_dataclass(target_config):
+        grid = getattr(target_config, "param_grid", None)
+
+    if grid:
+        keys = list(grid.keys())
+        value_combinations = list(itertools.product(*grid.values()))
+        results = []
+        total = len(value_combinations)
+
+        base_cfg = copy.deepcopy(target_config)
+        if isinstance(base_cfg, dict):
+            base_cfg.pop("param_grid", None)
+
+        n_trials = num_trials or (base_cfg.get("trials", 1) if isinstance(base_cfg, dict) else getattr(base_cfg, "trials", 1))
+
+        for idx, combo in enumerate(value_combinations, 1):
+            run_config = copy.deepcopy(base_cfg)
+            params_used = {}
+            for key, value in zip(keys, combo):
+                set_nested_key(run_config, key, value)
+                params_used[key] = value
+
+            params_str = ", ".join([f"{k}={v}" for k, v in params_used.items()])
+            log_trial_start(idx, total, params_str)
+
+            trial_metrics = _run_trials(
+                config=run_config,
+                num_trials=n_trials,
+                run_fn=run_fn,
+                output_dir=output_dir,
+                model=model,
+            )
+            results.append({
+                "parameters": params_used,
+                "metrics": trial_metrics,
+            })
+        return results
+
+    n_trials = num_trials or (target_config.get("trials", 1) if isinstance(target_config, dict) else getattr(target_config, "trials", 1))
+    return _run_trials(
+        config=target_config,
+        num_trials=n_trials,
+        run_fn=run_fn,
+        output_dir=output_dir,
+        model=model,
+    )
+
+
 def create_trial_runner(
     model_factory: Callable[[Dict[str, Any]], Any],
     loader_factory: Callable[[Dict[str, Any]], Any],
@@ -153,8 +205,8 @@ def create_trial_runner(
     optimizer_factory: Optional[Callable[[Any, Dict[str, Any]], Any]] = None,
     test_fn: Optional[Callable[[Any, Dict[str, Any]], Dict[str, Any]]] = None,
     log_model_structure: bool = True,
-) -> Callable[[int, Dict[str, Any]], Dict[str, Any]]:
-    """Helper factory that constructs a standardized single-trial runner callback for bokete.run_trials.
+) -> Callable[..., Dict[str, Any]]:
+    """Helper factory that constructs a standardized single-trial runner callback for bokete.run_experiments.
 
     Args:
         model_factory: Callable `(config) -> torch.nn.Module`.
@@ -165,9 +217,13 @@ def create_trial_runner(
         log_model_structure: Whether to log the full PyTorch model layer structure on trial 1 (default: True).
 
     Returns:
-        A callback `(trial_num, config) -> metrics_dict` compatible with bokete.run_trials.
+        A callback `(trial_num, config, output_dir=None) -> metrics_dict` compatible with bokete.run_experiments.
     """
-    def run_fn(trial_num: int, config: Dict[str, Any]) -> Dict[str, Any]:
+    def run_fn(trial_num: int, config: Dict[str, Any], output_dir: Optional[str] = None) -> Dict[str, Any]:
+        exp_name = config.get("experiment_name") if isinstance(config, dict) else getattr(config, "experiment_name", None)
+        if not exp_name or not str(exp_name).strip():
+            raise ValueError("Configuration must explicitly define 'experiment_name'.")
+
         # 1. Set seed per trial for stochastic variance
         base_seed = config.get("seed", 42)
         set_seed(base_seed + (trial_num - 1))
@@ -207,20 +263,22 @@ def create_trial_runner(
         )
 
         epochs = get_nested_key(config, "training.epochs") or 5
-        patience = get_nested_key(config, "training.patience") or 3
+        patience = get_nested_key(config, "training.patience")
+        early_stopping_obj = EarlyStopping(patience=patience) if patience is not None and patience > 0 else None
         save_ckpts = get_nested_key(config, "training.save_checkpoints")
         if save_ckpts is None:
             save_ckpts = True
 
-        output_base = config.get("output_dir") or "results"
-        exp_name = config.get("experiment_name") or "experiment"
-        trial_dir = Path(output_base) / exp_name / f"trial_{trial_num}"
+        if not output_dir:
+            output_dir = str(create_run_directory(config, attach_file_logger=False))
+
+        trial_dir = Path(output_dir) / f"trial_{trial_num}"
 
         history = trainer.fit(
             train_loader=train_loader,
             val_loader=val_loader,
             epochs=epochs,
-            early_stopping=EarlyStopping(patience=patience),
+            early_stopping=early_stopping_obj,
             checkpoint=Checkpoint(trial_dir / "checkpoints", enabled=save_ckpts),
         )
 

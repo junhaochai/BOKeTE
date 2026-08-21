@@ -139,7 +139,7 @@ def log_dataset_info(
         logger.info(f"[BOKeTE] Loaded Validation dataset subset: {val_samples:,} samples")
 
 
-def log_trial_start(trial_num: int, total_trials: int, experiment_name: str) -> None:
+def log_trial_start(trial_num: int, total_trials: int, experiment_name: str, seed: Optional[int] = None) -> None:
     """Logs a standardized trial header with clean unformatted console spacing.
 
     Raises:
@@ -152,8 +152,9 @@ def log_trial_start(trial_num: int, total_trials: int, experiment_name: str) -> 
         )
 
     clean_name = str(experiment_name).strip()
+    seed_str = f" (Seed: {seed})" if seed is not None else ""
     logger.info("")
-    logger.info(f"[BOKeTE] --- Starting Trial {trial_num}/{total_trials} [{clean_name}] ---")
+    logger.info(f"[BOKeTE] --- Starting Trial {trial_num}/{total_trials} [{clean_name}]{seed_str} ---")
 
 
 def log_model_info(
@@ -227,6 +228,15 @@ def setup_logging(
         h.setFormatter(formatter)
 
 
+def close_file_loggers() -> None:
+    """Closes and detaches all FileHandlers from the root logger to release OS file locks."""
+    root_logger = logging.getLogger()
+    for h in list(root_logger.handlers):
+        if isinstance(h, logging.FileHandler):
+            h.close()
+            root_logger.removeHandler(h)
+
+
 def create_run_directory(
     config: Optional[Any] = None,
     base_dir: str | Path = "results",
@@ -237,18 +247,21 @@ def create_run_directory(
     and optionally attaches a file logger (experiment.log) to the root logger.
 
     Accepts a config dict/dataclass directly as first argument (`create_run_directory(cfg)`).
+    Requires `experiment_name` to be explicitly defined in config or passed as an argument.
     """
     if config is not None:
         if is_dataclass(config) or isinstance(config, dict):
             if experiment_name is None:
                 experiment_name = getattr(config, "experiment_name", None) if is_dataclass(config) else config.get("experiment_name")
-            out = getattr(config, "output_dir", None) if is_dataclass(config) else config.get("output_dir")
-            if out and base_dir == "results":
-                base_dir = out
         elif isinstance(config, (str, Path)) and base_dir == "results":
             base_dir = config
 
-    subfolder = experiment_name or "experiment"
+    if not experiment_name or not str(experiment_name).strip():
+        raise ValueError(
+            "An experiment_name must be explicitly provided in configuration or arguments to create_run_directory()."
+        )
+
+    subfolder = str(experiment_name).strip()
     target_parent = Path(base_dir) / subfolder
     target_parent.mkdir(parents=True, exist_ok=True)
 
