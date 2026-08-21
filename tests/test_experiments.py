@@ -111,7 +111,21 @@ class TestExperiments(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             metrics_list = run_experiments(config, num_trials=2, run_fn=dummy_trial_fn, output_dir=tmpdir)
             self.assertEqual(len(metrics_list), 2)
-            self.assertTrue((Path(tmpdir) / "summary-report.md").exists())
+            self.assertTrue((Path(tmpdir) / "config-report.md").exists())
+
+    def test_keyboard_interrupt_graceful_exit(self):
+        config = {"experiment_name": "interrupt_test", "training": {"epochs": 1}}
+
+        def interrupting_loader_factory(cfg):
+            raise KeyboardInterrupt()
+
+        def dummy_model_factory(cfg):
+            return nn.Linear(5, 1)
+
+        runner = create_trial_runner(dummy_model_factory, interrupting_loader_factory)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            res = run_experiments(config, num_trials=1, run_fn=runner, output_dir=tmpdir)
+            self.assertEqual(res, [])
 
 
 if __name__ == "__main__":

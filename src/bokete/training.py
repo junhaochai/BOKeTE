@@ -107,7 +107,7 @@ def _default_prepare_batch(batch, device):
 
 def evaluate(model, loader, criterion, device=None, prepare_batch=None, amp_active=False):
     """Compute the mean loss of `model` over `loader` without tracking gradients."""
-    device = torch.device(device) if device is not None else determine_device()
+    device = torch.device(device) if device is not None else utils.determine_device()
 
     if prepare_batch is None:
         prepare_batch = _default_prepare_batch

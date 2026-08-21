@@ -8,8 +8,10 @@ Key Functions:
 """
 
 import copy
+from dataclasses import is_dataclass
 import itertools
 import logging
+import shutil
 import time
 from datetime import datetime
 from pathlib import Path
@@ -51,6 +53,14 @@ def _run_trials(
     start_time = start_dt.strftime("%Y-%m-%d %H:%M:%S")
     t0 = time.time()
 
+    # Resolve model for report: prioritize explicit model, fallback to dynamic build from model_factory
+    active_model = model
+    if active_model is None and hasattr(run_fn, "model_factory"):
+        try:
+            active_model = run_fn.model_factory(config)
+        except Exception:
+            active_model = None
+
     try:
         base_seed = config.get("seed", 42) if isinstance(config, dict) else getattr(config, "seed", 42)
         for i in range(1, num_trials + 1):
@@ -66,9 +76,10 @@ def _run_trials(
                     logger.info("")
                     logger.info(f"[BOKeTE] Trial {i} complete")
     except KeyboardInterrupt:
-        # User interrupted trial sweep; warning is logged inside Trainer.fit().
-        # Proceed to finally block to flush loggers and report completed trials.
-        pass
+        utils.close_file_loggers()
+        if not all_trial_metrics and output_dir and Path(output_dir).exists():
+            shutil.rmtree(output_dir, ignore_errors=True)
+        raise
     finally:
         utils.close_file_loggers()
 
@@ -81,14 +92,14 @@ def _run_trials(
     # (prevents errors on empty runs and enables partial reports for completed trials on KeyboardInterrupt)
     if output_dir and all_trial_metrics:
         logger.info("")
-        reporting.multi_trial_report(
+        reporting.config_report(
             config=config,
             all_trial_metrics=all_trial_metrics,
             save_path=output_dir,
             start_time=start_time,
             end_time=end_time,
             duration_seconds=duration_seconds,
-            model=model,
+            model=active_model,
         )
 
     # Log summary statistics if validation losses were recorded
@@ -158,37 +169,84 @@ def run_experiments(
 
         exp_name = target_config.get("experiment_name") if isinstance(target_config, dict) else getattr(target_config, "experiment_name", None)
 
-        for idx, combo in enumerate(value_combinations, 1):
-            run_config = copy.deepcopy(base_cfg)
-            params_used = {}
-            for key, value in zip(keys, combo):
-                utils.set_nested_key(run_config, key, value)
-                params_used[key] = value
+        sweep_start_dt = datetime.now()
+        sweep_start_time = sweep_start_dt.strftime("%Y-%m-%d %H:%M:%S")
+        sweep_t0 = time.time()
 
-            params_str = ", ".join([f"{k}={v}" for k, v in params_used.items()])
-            utils.log_experiment_start(idx, total, exp_name, params_str=params_str)
+        sweep_batch_dir = Path(output_dir) if output_dir else utils.create_run_directory(target_config, attach_file_logger=False)
 
-            trial_metrics = _run_trials(
-                config=run_config,
-                num_trials=n_trials,
-                run_fn=run_fn,
-                output_dir=output_dir,
-                model=model,
-            )
-            results.append({
-                "parameters": params_used,
-                "metrics": trial_metrics,
-            })
+        try:
+            for idx, combo in enumerate(value_combinations, 1):
+                run_config = copy.deepcopy(base_cfg)
+                params_used = {}
+                folder_parts = []
+                for key, value in zip(keys, combo):
+                    utils.set_nested_key(run_config, key, value)
+                    params_used[key] = value
+                    short_k = key.split(".")[-1]
+                    clean_v = str(value).replace(" ", "").replace(":", "-").replace("/", "-").replace("\\", "")
+                    folder_parts.append(f"{short_k}_{clean_v}")
+
+                params_str = ", ".join([f"{k}={v}" for k, v in params_used.items()])
+                utils.log_experiment_start(idx, total, exp_name, params_str=params_str)
+
+                param_folder_name = "_".join(folder_parts) if folder_parts else f"config_{idx}"
+                combo_dir = sweep_batch_dir / param_folder_name
+                combo_dir.mkdir(parents=True, exist_ok=True)
+
+                trial_metrics = _run_trials(
+                    config=run_config,
+                    num_trials=n_trials,
+                    run_fn=run_fn,
+                    output_dir=str(combo_dir),
+                    model=model,
+                )
+                results.append({
+                    "parameters": params_used,
+                    "metrics": trial_metrics,
+                    "run_dir": str(combo_dir),
+                })
+        except KeyboardInterrupt:
+            utils.close_file_loggers()
+            logger.warning("")
+            logger.warning(f"[BOKeTE] Experiment sweep {utils.format_tag(exp_name)} aborted by user (Ctrl+C).")
+            # If no completed combinations exist in batch dir, clean up the empty folder
+            if sweep_batch_dir.exists() and not any(sweep_batch_dir.iterdir()):
+                shutil.rmtree(sweep_batch_dir, ignore_errors=True)
+            return results
+
+        sweep_t1 = time.time()
+        sweep_end_dt = datetime.now()
+        sweep_end_time = sweep_end_dt.strftime("%Y-%m-%d %H:%M:%S")
+        sweep_duration = round(sweep_t1 - sweep_t0, 2)
+
+        logger.info("")
+        reporting.experiment_report(
+            config=target_config,
+            sweep_results=results,
+            save_path=sweep_batch_dir,
+            start_time=sweep_start_time,
+            end_time=sweep_end_time,
+            duration_seconds=sweep_duration,
+        )
         return results
 
     n_trials = num_trials or (target_config.get("trials", 1) if isinstance(target_config, dict) else getattr(target_config, "trials", 1))
-    return _run_trials(
-        config=target_config,
-        num_trials=n_trials,
-        run_fn=run_fn,
-        output_dir=output_dir,
-        model=model,
-    )
+    exp_name = target_config.get("experiment_name") if isinstance(target_config, dict) else getattr(target_config, "experiment_name", None)
+
+    try:
+        return _run_trials(
+            config=target_config,
+            num_trials=n_trials,
+            run_fn=run_fn,
+            output_dir=output_dir,
+            model=model,
+        )
+    except KeyboardInterrupt:
+        utils.close_file_loggers()
+        logger.warning("")
+        logger.warning(f"[BOKeTE] Experiment {utils.format_tag(exp_name)} aborted by user (Ctrl+C).")
+        return []
 
 
 def create_trial_runner(
@@ -222,84 +280,91 @@ def create_trial_runner(
         trial_seed = base_seed + (trial_num - 1)
         utils.set_seed(trial_seed)
 
-        # 2. Build dataloaders & model
-        train_loader, val_loader, *test = loader_factory(config)
-        test_loader = test[0] if test else None
-
-        model = model_factory(config)
-
-        # 3. Build criterion & optimizer
-        if criterion_factory:
-            criterion = criterion_factory(config)
-        else:
-            loss_name = utils.get_nested_key(config, "training.loss") or "CrossEntropyLoss"
-            criterion = getattr(torch.nn, loss_name)()
-
-        if optimizer_factory:
-            optimizer = optimizer_factory(model, config)
-        else:
-            opt_name = utils.get_nested_key(config, "training.optimizer") or "Adam"
-            lr = utils.get_nested_key(config, "training.lr") or 1e-3
-            opt_cls = getattr(torch.optim, opt_name)
-            optimizer = opt_cls(model.parameters(), lr=lr)
-
-        # 4. Determine device & run Trainer (log device and structure on trial 1)
-        is_first_trial = (trial_num == 1)
-        device = utils.determine_device(verbose=is_first_trial)
-        should_log_struct = log_model_structure and is_first_trial
-
-        trainer = training.Trainer(
-            model,
-            criterion,
-            optimizer,
-            device=device,
-            log_model_structure=should_log_struct,
-        )
-
-        # 5. Log trial start header right before starting training loop
-        utils.log_trial_start(trial_num, total_trials, exp_name, seed=trial_seed)
-
-        epochs = utils.get_nested_key(config, "training.epochs") or 5
-        patience = utils.get_nested_key(config, "training.patience")
-        early_stopping_obj = training.EarlyStopping(patience=patience) if patience is not None and patience > 0 else None
-        save_ckpts = utils.get_nested_key(config, "training.save_checkpoints")
-        if save_ckpts is None:
-            save_ckpts = True
-
         if not output_dir:
             output_dir = str(utils.create_run_directory(config, attach_file_logger=False))
 
         trial_dir = Path(output_dir) / f"trial_{trial_num}"
 
-        log_interval = utils.get_nested_key(config, "training.log_interval") or 1
+        # 2. Log trial start header immediately so the user gets active feedback before data/model loading
+        utils.log_trial_start(trial_num, total_trials, exp_name, seed=trial_seed)
 
-        history = trainer.fit(
-            train_loader=train_loader,
-            val_loader=val_loader,
-            epochs=epochs,
-            early_stopping=early_stopping_obj,
-            checkpoint=training.Checkpoint(trial_dir / "checkpoints", enabled=save_ckpts),
-            log_interval=log_interval,
-        )
+        try:
+            # 3. Build dataloaders & model
+            train_loader, val_loader, *test = loader_factory(config)
+            test_loader = test[0] if test else None
 
-        # 5. Evaluate post-training test metrics if test_fn provided
-        extra_metrics = None
-        if test_fn:
-            extra_metrics = test_fn(model, test_loader, config) if test_loader is not None else test_fn(model, config)
+            model = model_factory(config)
 
-        # 6. Generate per-trial Markdown report
-        reporting.experiment_report(
-            config=config,
-            metrics=history,
-            model=model,
-            extra_metrics=extra_metrics,
-            save_path=trial_dir,
-            title=f"{exp_name} - Trial {trial_num}",
-        )
+            # 4. Build criterion & optimizer
+            if criterion_factory:
+                criterion = criterion_factory(config)
+            else:
+                loss_name = utils.get_nested_key(config, "training.loss") or "CrossEntropyLoss"
+                criterion = getattr(torch.nn, loss_name)()
 
-        result = history.as_dict()
-        if extra_metrics:
-            result["extra_metrics"] = extra_metrics
-        return result
+            if optimizer_factory:
+                optimizer = optimizer_factory(model, config)
+            else:
+                opt_name = utils.get_nested_key(config, "training.optimizer") or "Adam"
+                lr = utils.get_nested_key(config, "training.lr") or 1e-3
+                opt_cls = getattr(torch.optim, opt_name)
+                optimizer = opt_cls(model.parameters(), lr=lr)
 
+            # 5. Determine device & run Trainer (log device and structure on trial 1)
+            is_first_trial = (trial_num == 1)
+            device = utils.determine_device(verbose=is_first_trial)
+            should_log_struct = log_model_structure and is_first_trial
+
+            trainer = training.Trainer(
+                model,
+                criterion,
+                optimizer,
+                device=device,
+                log_model_structure=should_log_struct,
+            )
+
+            epochs = utils.get_nested_key(config, "training.epochs") or 5
+            patience = utils.get_nested_key(config, "training.patience")
+            early_stopping_obj = training.EarlyStopping(patience=patience) if patience is not None and patience > 0 else None
+            save_ckpts = utils.get_nested_key(config, "training.save_checkpoints")
+            if save_ckpts is None:
+                save_ckpts = True
+
+            log_interval = utils.get_nested_key(config, "training.log_interval") or 1
+
+            history = trainer.fit(
+                train_loader=train_loader,
+                val_loader=val_loader,
+                epochs=epochs,
+                early_stopping=early_stopping_obj,
+                checkpoint=training.Checkpoint(trial_dir / "checkpoints", enabled=save_ckpts),
+                log_interval=log_interval,
+            )
+
+            # 6. Evaluate post-training test metrics if test_fn provided
+            extra_metrics = None
+            if test_fn:
+                extra_metrics = test_fn(model, test_loader, config) if test_loader is not None else test_fn(model, config)
+
+            # 7. Generate per-trial Markdown report
+            reporting.trial_report(
+                config=config,
+                metrics=history,
+                model=model,
+                extra_metrics=extra_metrics,
+                save_path=trial_dir,
+                title=f"{exp_name} - Trial {trial_num}",
+            )
+
+            result = history.as_dict()
+            if extra_metrics:
+                result["extra_metrics"] = extra_metrics
+            return result
+
+        except KeyboardInterrupt:
+            if trial_dir.exists():
+                shutil.rmtree(trial_dir, ignore_errors=True)
+            raise
+
+    run_fn.model_factory = model_factory  # type: ignore[attr-defined]
     return run_fn

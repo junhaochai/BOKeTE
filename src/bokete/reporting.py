@@ -1,9 +1,10 @@
 """
-Markdown report generation for single experiments and multi-trial runs.
+Markdown report generation for single trials, configurations, and experiment sweeps.
 
 Key Functions:
-  - experiment_report : Generates a structured GFM Markdown report string and saves to file.
-  - multi_trial_report: Aggregates statistics across multiple experimental trial runs.
+  - trial_report: Generates a structured GFM Markdown report string for a single trial.
+  - config_report: Aggregates statistics across multiple experimental trial runs for a configuration.
+  - experiment_report: Aggregates parameter combinations into a master comparative leaderboard.
 """
 
 from dataclasses import asdict, is_dataclass
@@ -105,7 +106,7 @@ def _format_model_section(model: Optional[Any]) -> tuple[str, str]:
     return bullet, section
 
 
-def experiment_report(
+def trial_report(
     config: Dict[str, Any],
     metrics_summary: Optional[Dict[str, Any]] = None,
     train_loss: Optional[List[float]] = None,
@@ -118,7 +119,7 @@ def experiment_report(
     save_path: Optional[Union[str, Path]] = None,
     model: Optional[Any] = None,
 ) -> str:
-    """Generates a structured GFM Markdown report string for an experiment run."""
+    """Generates a structured GFM Markdown report string for a single trial run."""
     out_file = utils.resolve_output_path(save_path, "report.md")
 
     # Detect if a TrainingMetrics or metrics dict was passed as 2nd positional argument
@@ -272,7 +273,7 @@ def experiment_report(
     return report_md
 
 
-def multi_trial_report(
+def config_report(
     config: Dict[str, Any],
     all_trial_metrics: List[Dict[str, Any]],
     save_path: Optional[Union[str, Path]] = None,
@@ -283,8 +284,8 @@ def multi_trial_report(
     graph_filename: Optional[str] = "multi_trial_loss.png",
     auto_plot: bool = True,
 ) -> str:
-    """Aggregates statistics across multiple experimental trial runs and generates a summary Markdown report."""
-    out_file = utils.resolve_output_path(save_path, "summary-report.md")
+    """Aggregates statistics across multiple experimental trial runs for a configuration (config-report.md)."""
+    out_file = utils.resolve_output_path(save_path, "config-report.md")
 
     if auto_plot and graph_filename and out_file and all_trial_metrics:
         graph_path = out_file.parent / graph_filename
@@ -296,7 +297,7 @@ def multi_trial_report(
 
     best_val_losses = [min(m['val_loss']) for m in all_trial_metrics if m and 'val_loss' in m and m['val_loss']]
     if not best_val_losses:
-        report_md = "# Multi-Trial Experiment Summary\n\nNo trial metrics recorded."
+        report_md = "# Configuration Report\n\nNo trial metrics recorded."
         _write_report(out_file, report_md)
         return report_md
 
@@ -357,7 +358,7 @@ def multi_trial_report(
 
     config_dict, param_rows = _format_config_table(config)
     exp_name = config_dict.get('experiment_name') or config_dict.get('exp_name') or config_dict.get('name')
-    header_title = f"Multi-Trial Experiment Summary: {exp_name}" if (exp_name and exp_name != config_dict.get('dataset')) else "Multi-Trial Experiment Summary"
+    header_title = f"Configuration Report: {exp_name}" if (exp_name and exp_name != config_dict.get('dataset')) else "Configuration Report"
 
     exp_bullet = f"- **Experiment Name:** `{exp_name}`\n" if (exp_name and exp_name != config_dict.get('dataset')) else ""
 
@@ -392,5 +393,150 @@ def multi_trial_report(
 """
     _write_report(out_file, report_md)
     return report_md
+
+
+def experiment_report(
+    config: Dict[str, Any],
+    sweep_results: List[Dict[str, Any]],
+    save_path: Optional[Union[str, Path]] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    duration_seconds: Optional[float] = None,
+) -> str:
+    """Aggregates all parameter combinations and generates the master experiment-report.md leaderboard."""
+    out_file = utils.resolve_output_path(save_path, "experiment-report.md")
+
+    config_dict, param_rows = _format_config_table(config)
+    exp_name = config_dict.get('experiment_name') or config_dict.get('exp_name') or config_dict.get('name')
+    header_title = f"Experiment Report: {exp_name}" if exp_name else "Experiment Report"
+
+    # Extract aggregated statistics per combo
+    processed_combos = []
+    all_extra_keys: List[str] = []
+    for res in sweep_results:
+        metrics_list = res.get("metrics", [])
+        for m in metrics_list:
+            if isinstance(m, dict) and "extra_metrics" in m and isinstance(m["extra_metrics"], dict):
+                for k in m["extra_metrics"].keys():
+                    if k not in all_extra_keys:
+                        all_extra_keys.append(k)
+
+    for idx, res in enumerate(sweep_results, 1):
+        params = res.get("parameters", {})
+        metrics_list = res.get("metrics", [])
+        run_dir = res.get("run_dir")
+
+        best_val_losses = [min(m['val_loss']) for m in metrics_list if m and 'val_loss' in m and m['val_loss']]
+        mean_best_val = float(np.mean(best_val_losses)) if best_val_losses else None
+        std_best_val = float(np.std(best_val_losses)) if best_val_losses else 0.0
+
+        final_train_losses = [m['train_loss'][-1] for m in metrics_list if m and 'train_loss' in m and m['train_loss']]
+        mean_final_train = float(np.mean(final_train_losses)) if final_train_losses else None
+
+        final_val_losses = [m['val_loss'][-1] for m in metrics_list if m and 'val_loss' in m and m['val_loss']]
+        mean_final_val = float(np.mean(final_val_losses)) if final_val_losses else None
+
+        extra_stats = {}
+        for ek in all_extra_keys:
+            num_vals = []
+            for m in metrics_list:
+                em = m.get('extra_metrics', {}) if isinstance(m, dict) else {}
+                if ek in em:
+                    try:
+                        num_vals.append(float(em[ek]))
+                    except (ValueError, TypeError):
+                        pass
+            if num_vals:
+                extra_stats[ek] = (float(np.mean(num_vals)), float(np.std(num_vals)))
+
+        param_desc = ", ".join([f"`{k}={v}`" for k, v in params.items()]) or f"Config #{idx}"
+
+        processed_combos.append({
+            "combo_index": idx,
+            "params": params,
+            "param_desc": param_desc,
+            "mean_best_val": mean_best_val,
+            "std_best_val": std_best_val,
+            "mean_final_train": mean_final_train,
+            "mean_final_val": mean_final_val,
+            "extra_stats": extra_stats,
+            "run_dir": run_dir,
+            "num_trials": len(metrics_list),
+        })
+
+    sorted_combos = sorted(
+        processed_combos,
+        key=lambda c: c["mean_best_val"] if c["mean_best_val"] is not None else float("inf")
+    )
+
+    table_headers = ["Rank", "Configuration", "Mean Best Val Loss"]
+    table_aligns = [":---:", ":---", ":---:"]
+
+    for ek in all_extra_keys:
+        table_headers.append(f"Mean {ek}")
+        table_aligns.append(":---:")
+
+    table_headers.extend(["Mean Final Train Loss", "Mean Final Val Loss", "Trials"])
+    table_aligns.extend([":---:", ":---:", ":---:"])
+
+    rows = []
+    medals = ["🥇 1", "🥈 2", "🥉 3"]
+    for rank_idx, combo in enumerate(sorted_combos, 1):
+        rank_badge = medals[rank_idx - 1] if rank_idx <= 3 else str(rank_idx)
+        val_str = f"`{combo['mean_best_val']:.4f} ± {combo['std_best_val']:.4f}`" if combo['mean_best_val'] is not None else "`N/A`"
+        tr_str = f"`{combo['mean_final_train']:.4f}`" if combo['mean_final_train'] is not None else "`N/A`"
+        fv_str = f"`{combo['mean_final_val']:.4f}`" if combo['mean_final_val'] is not None else "`N/A`"
+
+        cells = [rank_badge, combo["param_desc"], val_str]
+        for ek in all_extra_keys:
+            if ek in combo["extra_stats"]:
+                m_v, s_v = combo["extra_stats"][ek]
+                cells.append(f"`{m_v:.4f} ± {s_v:.4f}`")
+            else:
+                cells.append("`N/A`")
+
+        cells.extend([tr_str, fv_str, f"`{combo['num_trials']}`"])
+        rows.append("| " + " | ".join(cells) + " |")
+
+    leaderboard_table = f"| {' | '.join(table_headers)} |\n| {' | '.join(table_aligns)} |\n" + "\n".join(rows)
+
+    top_performer = sorted_combos[0] if sorted_combos else None
+    if top_performer and top_performer["mean_best_val"] is not None:
+        best_details = [f"- **Optimal Configuration:** {top_performer['param_desc']}"]
+        best_details.append(f"- **Best Validation Loss:** `{top_performer['mean_best_val']:.4f} ± {top_performer['std_best_val']:.4f}`")
+        for ek, (mv, sv) in top_performer["extra_stats"].items():
+            best_details.append(f"- **Best {ek}:** `{mv:.4f} ± {sv:.4f}`")
+        winner_box = "\n".join(best_details)
+    else:
+        winner_box = "- No winning configuration determined."
+
+    exp_bullet = f"- **Experiment Name:** `{exp_name}`\n" if exp_name else ""
+    start_line = f"- **Start Date:** `{start_time}`\n" if start_time else f"- **Execution Date:** `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n"
+    end_line = f"- **End Date:** `{end_time}`\n" if end_time else ""
+    dur_line = f"- **Total Duration:** `{utils.format_duration(duration_seconds)}` (`{duration_seconds:.2f}s`)\n" if duration_seconds is not None else ""
+    dev_str = _resolve_device_string(config_dict)
+    dev_line = f"- **Execution Device:** `{dev_str}`\n"
+    total_configs = len(sweep_results)
+
+    report_md = f"""# {header_title}
+
+## Study Overview
+{exp_bullet}{start_line}{end_line}{dur_line}{dev_line}- **Configurations Tested:** `{total_configs}`
+- **Total Executions:** `{sum(c['num_trials'] for c in processed_combos)}` trials
+
+## Executive Summary
+{winner_box}
+
+## Comparative Leaderboard
+{leaderboard_table}
+
+## Base Experiment Configuration
+| Parameter | Value |
+| :--- | :--- |
+{param_rows}
+"""
+    _write_report(out_file, report_md)
+    return report_md
+
 
 

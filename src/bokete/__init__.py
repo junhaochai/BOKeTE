@@ -40,7 +40,11 @@ from bokete.experiments import (
     create_trial_runner,
     run_experiments,
 )
-from bokete.reporting import experiment_report, multi_trial_report
+from bokete.reporting import (
+    config_report,
+    experiment_report,
+    trial_report,
+)
 
 __version__ = "0.1.1"
 
@@ -52,6 +56,7 @@ __all__ = [
     "EarlyStopping",
     "TrainingMetrics",
     "close_file_loggers",
+    "config_report",
     "create_run_directory",
     "create_trial_runner",
     "determine_device",
@@ -69,12 +74,12 @@ __all__ = [
     "log_experiment_start",
     "log_model_info",
     "log_trial_start",
-    "multi_trial_report",
     "plot_loss_curves",
     "set_nested_key",
     "set_seed",
     "setup_logging",
     "training_report",
+    "trial_report",
     "Trainer",
     "run_experiments",
 ]
