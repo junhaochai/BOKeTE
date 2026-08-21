@@ -1,6 +1,8 @@
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 
+from bokete.utils import flatten_dict
+
 
 def experiment_report(
     config: Dict[str, Any],
@@ -12,7 +14,7 @@ def experiment_report(
     title: Optional[str] = None,
 ) -> str:
     """Generates a structured GFM Markdown report string for an experiment run."""
-    flat_config = _flatten_dict(config)
+    flat_config = flatten_dict(config)
     param_rows = "\n".join([f"| `{k}` | `{v}` |" for k, v in flat_config.items()])
 
     exp_name = config.get('experiment_name') or config.get('exp_name') or config.get('name')
@@ -116,17 +118,6 @@ def experiment_report(
 """
 
 
-def _flatten_dict(d, parent_key=''):
-    items = []
-    for k, v in d.items():
-        new_key = f"{parent_key}.{k}" if parent_key else k
-        if isinstance(v, dict):
-            items.extend(_flatten_dict(v, new_key).items())
-        else:
-            items.append((new_key, v))
-    return dict(items)
-
-
 def multi_trial_report(
     config: Dict[str, Any],
     all_trial_metrics: List[Dict[str, Any]]
@@ -155,16 +146,19 @@ def multi_trial_report(
         trial_rows.append(f"| Trial {idx} | `{b_ep}` | `{b_val}` | `{f_tr}` | `{f_vl}` |")
 
     trial_table = "\n".join(trial_rows)
-    flat_config = _flatten_dict(config)
+    flat_config = flatten_dict(config)
+    param_rows = "\n".join([f"| `{k}` | `{v}` |" for k, v in flat_config.items()])
     exp_name = config.get('experiment_name') or config.get('exp_name') or config.get('name')
     header_title = f"Multi-Trial Experiment Summary: {exp_name}" if (exp_name and exp_name != config.get('dataset')) else "Multi-Trial Experiment Summary"
 
     exp_bullet = f"- **Experiment Name:** `{exp_name}`\n" if (exp_name and exp_name != config.get('dataset')) else ""
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     return f"""# {header_title}
 
 ## Aggregate Performance ({len(all_trial_metrics)} Trials)
-{exp_bullet}- **Mean Best Validation Loss:** `{mean_val:.4f} ± {std_val:.4f}`
+{exp_bullet}- **Execution Date:** `{now_str}`
+- **Mean Best Validation Loss:** `{mean_val:.4f} ± {std_val:.4f}`
 - **Lowest Validation Loss (Best Trial):** `{min_val:.4f}` (Trial {best_trial_idx})
 - **Highest Validation Loss:** `{max_val:.4f}`
 

@@ -1,7 +1,8 @@
 <a id="readme-top"></a>
 
-# BoKeTE
+# BOKeTE
 
+[![PyPI Version](https://img.shields.io/pypi/v/BOKeTE.svg)](https://pypi.org/project/BOKeTE/)
 [![Licence: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![PyTorch: 2.0+](https://img.shields.io/badge/PyTorch-2.0%2B-ee4c2c.svg)](https://pytorch.org/)
@@ -10,9 +11,9 @@
 A minimal PyTorch training and experimentation helper library for my personal use. Extracted from my computer vision final year project (2024/2025) at the University of Nottingham. Named after the Bad Bunny song *BoKeTe*, which refers to pothole in English. Designed as a modular, reusable helper package for general PyTorch deep learning workflows:
 
 <p align="center">
-  <img src="assets/BoKeTE.png" alt="BoKeTE Music Video" width="600" />
+  <img src="https://raw.githubusercontent.com/junhaochai/BoKeTE/master/assets/BOKeTE.png" alt="BOKeTE Music Video" width="600" />
   <br>
-  <sub><em>"BoKeTe": Music video homage & namesake inspiration.</em></sub>
+  <sub><em>"BOKeTE": Music video homage & namesake inspiration.</em></sub>
 </p>
 
 - **Training & Execution**: `Trainer` loop with mixed-precision (AMP), auto cuDNN benchmarking, `EarlyStopping`, and model/optimizer checkpointing.
@@ -51,6 +52,8 @@ All core primitives are exported at the root package level (`from bokete import 
 | `plot_loss_curves(...)` | `bokete.plotting` | Renders Matplotlib loss graph & interactive Chart.js HTML plot. |
 | `experiment_report(...)` | `bokete.reporting` | Generates a structured GFM Markdown trial report string with dynamic overview metadata. |
 | `multi_trial_report(...)` | `bokete.reporting` | Generates a combined GFM Markdown summary report string across multiple experiment trials. |
+| `log_trial_start(...)` | `bokete.utils` | Logs a standardized trial header with clean unformatted console spacing. |
+| `run_trials(...)` | `bokete.experiments` | Orchestrates multi-trial runs with clean logging, Ctrl+C cancellation, and auto-report saving. |
 | `run_experiments(...)` | `bokete.experiments` | Executes grid search parameter sweeps across configuration paths. |
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
@@ -59,18 +62,22 @@ All core primitives are exported at the root package level (`from bokete import 
 
 ## 2. Installation
 
-`bokete` is packaged using the `hatchling` build backend and is fully compatible with `uv` workspaces.
-
-### Workspace / Local Installation (`uv`)
-When used inside a project workspace, `uv sync` automatically installs `bokete` in editable mode:
+Install `bokete` directly from PyPI:
 
 ```bash
-uv sync
+pip install bokete
 ```
 
-*Or standalone via `uv pip`:*
+*Or via `uv`:*
 ```bash
-uv pip install -e ./bokete
+uv pip install bokete
+```
+
+### Local / Editable Installation
+For local development and workspace integration:
+
+```bash
+uv pip install -e .
 ```
 
 ### Dependency Requirements
@@ -164,8 +171,25 @@ with open("summary-report.md", "w", encoding="utf-8") as f:
     f.write(summary_md)
 ```
 
-### 3.5 Hyperparameter Sweeps (`bokete.experiments`)
-Orchestrates parameter sweeps over a grid of configuration paths without bleeding state across runs.
+### 3.5 Multi-Trial Execution & Sweeps (`bokete.experiments`)
+Orchestrates multi-trial runs and parameter sweeps over a grid of configuration paths without bleeding state across runs.
+
+#### Multi-Trial Orchestration (`run_trials`)
+Runs a single configuration across multiple trials with clean console logging, graceful `Ctrl+C` cancellation, and auto-generation of `summary-report.md`:
+
+```python
+from bokete import run_trials
+
+all_trial_metrics = run_trials(
+    config=config,
+    num_trials=3,
+    run_fn=lambda trial_num, cfg: train_single_trial(cfg, trial_num),
+    output_dir="./results/run_01"
+)
+```
+
+#### Grid Search Sweeps (`run_experiments`)
+Executes parameter combinations across a configuration grid:
 
 ```python
 from bokete import run_experiments
@@ -251,11 +275,12 @@ bokete/
 └── src/
     └── bokete/
         ├── __init__.py    # Public API exports
-        ├── experiments.py # Grid sweep orchestration
+        ├── experiments.py # Multi-trial execution & grid search parameter sweeps
         ├── metrics.py     # Loss aggregation & summary statistics
         ├── plotting.py    # Matplotlib loss curve & Chart.js HTML rendering
         ├── reporting.py   # Single-trial & multi-trial Markdown report generation
-        └── training.py    # Core Trainer, EarlyStopping, Checkpoint, auto-benchmarking
+        ├── training.py    # Core Trainer, EarlyStopping, Checkpoint, auto-benchmarking
+        └── utils.py       # Configuration I/O, device checks, seeds & console formatters
 ```
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>

@@ -8,35 +8,16 @@ import random
 from pathlib import Path
 from typing import Callable, Optional, Any
 
+import logging
 import numpy as np
 import torch
 import tqdm
 from torch.utils.data import DataLoader
 
 from bokete.metrics import TrainingMetrics
+from bokete.utils import set_seed, determine_device
 
-
-def set_seed(seed: int, deterministic: bool = False):
-    """Seed Python, NumPy and PyTorch (CPU and all CUDA devices) for reproducibility."""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
-    if deterministic:
-        # Enforce deterministic behaviour for convolutions and matrix multiplications
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-        os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
-
-
-def determine_device():
-    """Return the best available PyTorch device: CUDA, MPS (Mac), or CPU."""
-    if torch.cuda.is_available():
-        return torch.device('cuda')
-    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        return torch.device('mps')
-    return torch.device('cpu')
+logger = logging.getLogger(__name__)
 
 
 class EarlyStopping:
@@ -194,72 +175,77 @@ class Trainer:
         self._last_spatial_shape = None
         self._variable_shapes_detected = False
 
-        with tqdm.tqdm(range(epochs), desc=" Epochs", dynamic_ncols=True, leave=False, disable=not progress) as pbar:
-            for epoch in pbar:
-                self.model.train()
-                running_loss = 0.0
-                batches_run = 0
+        try:
+            with tqdm.tqdm(range(epochs), desc=" Epochs", dynamic_ncols=True, leave=False, disable=not progress) as pbar:
+                for epoch in pbar:
+                    self.model.train()
+                    running_loss = 0.0
+                    batches_run = 0
 
-                for batch in train_loader:
-                    if max_train_batches is not None and batches_run >= max_train_batches:
+                    for batch in train_loader:
+                        if max_train_batches is not None and batches_run >= max_train_batches:
+                            break
+
+                        inputs, targets = self.prepare_batch(batch, self.device)
+
+                        # Auto-detect spatial shape consistency for cuDNN benchmarking
+                        if self.device.type == 'cuda' and not self._variable_shapes_detected:
+                            spatial_shape = tuple(inputs.shape[1:])
+                            if self._last_spatial_shape is None:
+                                self._last_spatial_shape = spatial_shape
+                                torch.backends.cudnn.benchmark = True
+                            elif spatial_shape != self._last_spatial_shape:
+                                self._variable_shapes_detected = True
+                                torch.backends.cudnn.benchmark = False
+
+                        self.optimizer.zero_grad()
+
+                        with torch.autocast(device_type=self.device.type, enabled=self.amp_active):
+                            outputs = self.model(inputs)
+                            loss = self.criterion(outputs, targets)
+
+                        self.scaler.scale(loss).backward()
+                        if self.max_grad_norm is not None:
+                            # Gradients must be unscaled before clipping, otherwise the
+                            # threshold would apply to AMP-scaled values.
+                            self.scaler.unscale_(self.optimizer)
+                            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+
+                        running_loss += loss.item()
+                        batches_run += 1
+
+                    # Mean over batches actually run, not len(train_loader)
+                    train_loss = round(running_loss / max(batches_run, 1), 4)
+                    metrics.train_loss.append(train_loss)
+
+                    val_loss = round(evaluate(self.model, val_loader, self.criterion,
+                                              device=self.device, prepare_batch=self.prepare_batch,
+                                              amp_active=self.amp_active), 4)
+                    metrics.val_loss.append(val_loss)
+                    pbar.set_postfix(train_loss=f"{train_loss:.4f}", val_loss=f"{val_loss:.4f}")
+
+                    if metrics.best_val_loss is None or val_loss < metrics.best_val_loss:
+                        metrics.best_val_loss = val_loss
+                        metrics.best_epoch = epoch + 1
+
+                    if scheduler is not None:
+                        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                            if val_loss is not None:
+                                scheduler.step(val_loss)
+                        else:
+                            scheduler.step()
+
+                    if checkpoint is not None:
+                        checkpoint.update(self.model, epoch + 1, val_loss, optimizer=self.optimizer)
+
+                    if early_stopping is not None and early_stopping.step(val_loss):
+                        metrics.stopped_early = True
                         break
-
-                    inputs, targets = self.prepare_batch(batch, self.device)
-
-                    # Auto-detect spatial shape consistency for cuDNN benchmarking
-                    if self.device.type == 'cuda' and not self._variable_shapes_detected:
-                        spatial_shape = tuple(inputs.shape[1:])
-                        if self._last_spatial_shape is None:
-                            self._last_spatial_shape = spatial_shape
-                            torch.backends.cudnn.benchmark = True
-                        elif spatial_shape != self._last_spatial_shape:
-                            self._variable_shapes_detected = True
-                            torch.backends.cudnn.benchmark = False
-
-                    self.optimizer.zero_grad()
-
-                    with torch.autocast(device_type=self.device.type, enabled=self.amp_active):
-                        outputs = self.model(inputs)
-                        loss = self.criterion(outputs, targets)
-
-                    self.scaler.scale(loss).backward()
-                    if self.max_grad_norm is not None:
-                        # Gradients must be unscaled before clipping, otherwise the
-                        # threshold would apply to AMP-scaled values.
-                        self.scaler.unscale_(self.optimizer)
-                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-
-                    running_loss += loss.item()
-                    batches_run += 1
-
-                # Mean over batches actually run, not len(train_loader)
-                train_loss = round(running_loss / max(batches_run, 1), 4)
-                metrics.train_loss.append(train_loss)
-
-                val_loss = round(evaluate(self.model, val_loader, self.criterion,
-                                          device=self.device, prepare_batch=self.prepare_batch,
-                                          amp_active=self.amp_active), 4)
-                metrics.val_loss.append(val_loss)
-                pbar.set_postfix(train_loss=f"{train_loss:.4f}", val_loss=f"{val_loss:.4f}")
-
-                if metrics.best_val_loss is None or val_loss < metrics.best_val_loss:
-                    metrics.best_val_loss = val_loss
-                    metrics.best_epoch = epoch + 1
-
-                if scheduler is not None:
-                    if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                        if val_loss is not None:
-                            scheduler.step(val_loss)
-                    else:
-                        scheduler.step()
-
-                if checkpoint is not None:
-                    checkpoint.update(self.model, epoch + 1, val_loss, optimizer=self.optimizer)
-
-                if early_stopping is not None and early_stopping.step(val_loss):
-                    metrics.stopped_early = True
-                    break
+        except KeyboardInterrupt:
+            logger.warning("\n[BOKeTE] Training loop interrupted by user (KeyboardInterrupt). Aborting remaining epochs...")
+            metrics.interrupted = True
+            raise
 
         return metrics
