@@ -18,41 +18,35 @@ from src.schema import ExperimentConfig
 
 
 def main() -> None:
-    # 1. Load Configuration YAML into typed ExperimentConfig via bokete
-    config_path = Path(__file__).parent / "configs" / "example.yaml"
-    cfg = bokete.load_config_as(config_path, ExperimentConfig)
+    # 1. Parse CLI arguments & load configuration YAML via bokete
+    cfg = bokete.parse_cli_config(
+        ExperimentConfig,
+        default_config=Path(__file__).parent / "configs" / "example.yaml",
+    )
 
     # 2. Setup Environment
     bokete.set_seed(cfg.seed)
     device = bokete.determine_device(verbose=False)
 
     # 3. Create Timestamped Run Directory
-    run_dir = Path(
-        bokete.create_run_directory(
-            base_dir=Path(__file__).parent / "results",
-            experiment_name=cfg.experiment_name,
-        )
-    )
+    run_dir = bokete.create_run_directory(cfg)
 
-    # 4. Load MNIST Dataset
+    # 4. Load MNIST Dataset & DataLoaders
     transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.1307,), (0.3081,)),
     ])
-
-    data_dir = Path("./data")
-    train_dataset = datasets.MNIST(
-        root=data_dir, train=True, download=True, transform=transform
-    )
-    val_dataset = datasets.MNIST(
-        root=data_dir, train=False, download=True, transform=transform
-    )
+    ds_kwargs = dict(root=Path("./data"), download=True, transform=transform)
 
     train_loader = DataLoader(
-        train_dataset, batch_size=cfg.data.batch_size, shuffle=True
+        datasets.MNIST(train=True, **ds_kwargs),
+        batch_size=cfg.data.batch_size,
+        shuffle=True,
     )
     val_loader = DataLoader(
-        val_dataset, batch_size=cfg.data.val_batch_size, shuffle=False
+        datasets.MNIST(train=False, **ds_kwargs),
+        batch_size=cfg.data.val_batch_size,
+        shuffle=False,
     )
 
     # 5. Model, Loss, Optimizer
@@ -61,13 +55,12 @@ def main() -> None:
         hidden_dim=cfg.model.hidden_dim,
         num_classes=cfg.model.num_classes,
     ).to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.training.lr)
+    
+    loss_cls = getattr(nn, cfg.training.loss)
+    criterion = loss_cls()
 
-    callbacks = [
-        bokete.EarlyStopping(patience=cfg.training.patience),
-        bokete.Checkpoint(directory=run_dir / "checkpoints"),
-    ]
+    opt_cls = getattr(torch.optim, cfg.training.optimizer)
+    optimizer = opt_cls(model.parameters(), lr=cfg.training.lr)
 
     # 6. Train Model via Trainer Wrapper
     trainer = bokete.Trainer(model, criterion, optimizer, device=device)
@@ -75,8 +68,8 @@ def main() -> None:
         train_loader=train_loader,
         val_loader=val_loader,
         epochs=cfg.training.epochs,
-        callbacks=callbacks,
-        progress=True,
+        early_stopping=bokete.EarlyStopping(patience=cfg.training.patience),
+        checkpoint=bokete.Checkpoint(directory=run_dir / "checkpoints"),
     )
 
     # 7. Generate & Save Markdown Report + Loss Graph PNG/HTML

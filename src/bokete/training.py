@@ -235,7 +235,7 @@ class Trainer:
         self._last_spatial_shape = None
         self._variable_shapes_detected = False
 
-        # Consolidate callbacks from list and legacy keyword arguments
+        # Consolidate callbacks from list and explicit keyword arguments
         all_callbacks = list(callbacks or [])
         if early_stopping and early_stopping not in all_callbacks:
             all_callbacks.append(early_stopping)

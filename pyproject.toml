@@ -30,6 +30,8 @@ dependencies = [
     "matplotlib",
     "tqdm",
     "pyyaml",
+]
+
 [project.scripts]
 bokete = "bokete.cli:main"
 

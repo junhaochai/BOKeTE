@@ -4,6 +4,7 @@ General utility functions for configuration I/O, directory management, hardware 
 Key Classes & Functions:
   - load_config         : Parses YAML configuration files into dictionaries.
   - load_config_as      : Loads YAML files directly into user-defined @dataclass schemas.
+  - parse_cli_config    : Parses CLI arguments for --config and loads YAML directly into @dataclass schemas.
   - create_run_directory: Creates timestamped output subfolders (results/exp_name/YYYYMMDD-XX/).
   - set_seed            : Sets random seeds across Python, NumPy, and PyTorch for reproducibility.
   - determine_device    : Auto-detects optimal hardware accelerator (CUDA / MPS / CPU).
@@ -15,13 +16,14 @@ Key Classes & Functions:
   - set_nested_key      : Updates a value deep inside a nested dictionary by key path.
 """
 
+import argparse
 from dataclasses import fields, is_dataclass
 from datetime import datetime
 import logging
 import os
 import random
 from pathlib import Path
-from typing import Dict, Any, Optional, Type, TypeVar
+from typing import Dict, Any, Optional, Sequence, Type, TypeVar
 
 import numpy as np
 import torch
@@ -111,30 +113,64 @@ def log_trial_start(trial_num: int, total_trials: int, name: str = "") -> None:
 
 
 def create_run_directory(
-    base_dir: str = "results",
+    base_dir: str | Path | Any = "results",
     experiment_name: Optional[str] = None,
     dataset_name: Optional[str] = None,
     attach_file_logger: bool = True,
-) -> str:
+    config: Optional[Any] = None,
+) -> Path:
     """Creates a timestamped experiment directory (e.g. results/exp_name/YYYYMMDD-01)
     and optionally attaches a file logger (experiment.log) to the root logger.
+
+    Accepts a config dict/dataclass directly: `create_run_directory(cfg)`
     """
+    if is_dataclass(base_dir) or isinstance(base_dir, dict) or hasattr(base_dir, "experiment_name"):
+        config = base_dir
+        base_dir = "results"
+
+    if config is not None:
+        if base_dir == "results":
+            if hasattr(config, "output_dir") and getattr(config, "output_dir"):
+                base_dir = getattr(config, "output_dir")
+            elif hasattr(config, "base_dir") and getattr(config, "base_dir"):
+                base_dir = getattr(config, "base_dir")
+            elif isinstance(config, dict):
+                base_dir = config.get("output_dir") or config.get("base_dir") or "results"
+
+        if experiment_name is None:
+            if hasattr(config, "experiment_name"):
+                experiment_name = getattr(config, "experiment_name")
+            elif isinstance(config, dict):
+                experiment_name = config.get("experiment_name") or config.get("exp_name")
+        if dataset_name is None:
+            if hasattr(config, "dataset_name"):
+                dataset_name = getattr(config, "dataset_name")
+            elif hasattr(config, "dataset") and hasattr(config.dataset, "name"):
+                dataset_name = getattr(config.dataset, "name")
+            elif isinstance(config, dict):
+                d = config.get("dataset")
+                if isinstance(d, dict):
+                    dataset_name = d.get("name")
+                elif isinstance(d, str):
+                    dataset_name = d
+
+    base_path = Path(base_dir)
     now = datetime.now()
     date_prefix = now.strftime("%Y%m%d")
 
     subfolder = experiment_name or dataset_name or "experiment"
-    target_parent = os.path.join(base_dir, subfolder)
-    os.makedirs(target_parent, exist_ok=True)
+    target_parent = base_path / subfolder
+    target_parent.mkdir(parents=True, exist_ok=True)
 
     existing = [
-        d for d in os.listdir(target_parent)
-        if os.path.isdir(os.path.join(target_parent, d)) and d.startswith(date_prefix)
+        d for d in target_parent.iterdir()
+        if d.is_dir() and d.name.startswith(date_prefix)
     ]
-    run_dir = os.path.join(target_parent, f"{date_prefix}-{len(existing)+1:02d}")
-    os.makedirs(run_dir, exist_ok=True)
+    run_dir = target_parent / f"{date_prefix}-{len(existing)+1:02d}"
+    run_dir.mkdir(parents=True, exist_ok=True)
 
     if attach_file_logger:
-        log_path = os.path.join(run_dir, "experiment.log")
+        log_path = run_dir / "experiment.log"
         handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
         formatter = BOKeTEFormatter("%(asctime)s [%(levelname)s] %(message)s", "%Y-%m-%d %H:%M:%S")
         handler.setFormatter(formatter)
@@ -210,3 +246,22 @@ def load_config_as(config_path: str | Path, dataclass_cls: Type[T]) -> T:
         return cls(**kwargs)
 
     return _from_dict(dataclass_cls, raw or {})
+
+
+def parse_cli_config(
+    dataclass_cls: Type[T],
+    default_config: str | Path | None = None,
+    description: str = "PyTorch Training Pipeline via BOKeTE",
+    args_list: Optional[Sequence[str]] = None,
+) -> T:
+    """Parses command-line arguments for a --config YAML file path and loads it into a dataclass schema."""
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path(default_config) if default_config else None,
+        help="Path to YAML configuration file",
+        required=default_config is None,
+    )
+    parsed_args = parser.parse_args(args_list)
+    return load_config_as(parsed_args.config, dataclass_cls)

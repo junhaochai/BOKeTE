@@ -17,6 +17,8 @@ class ModelConfig:
 class TrainingConfig:
     epochs: int = 5
     lr: float = 1e-3
+    optimizer: str = "Adam"
+    loss: str = "CrossEntropyLoss"
     patience: int = 3
 
 

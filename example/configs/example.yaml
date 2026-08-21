@@ -12,4 +12,6 @@ model:
 training:
   epochs: 5
   lr: 0.001
+  optimizer: "Adam"
+  loss: "CrossEntropyLoss"
   patience: 3

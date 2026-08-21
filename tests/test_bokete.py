@@ -254,6 +254,30 @@ class TestBokete(unittest.TestCase):
             self.assertIsInstance(parsed, RootConfig)
             self.assertIsInstance(parsed.sub, SubConfig)
 
+    def test_parse_cli_config(self):
+        from dataclasses import dataclass
+        from bokete import parse_cli_config
+
+        @dataclass
+        class DummyConfig:
+            experiment_name: str = "default_exp"
+
+        config_path = Path("example/configs/example.yaml")
+        if config_path.exists():
+            cfg = parse_cli_config(
+                DummyConfig,
+                args_list=["--config", str(config_path)],
+            )
+            self.assertIsInstance(cfg, DummyConfig)
+
+            # Test default_config fallback when no --config flag is passed
+            cfg_default = parse_cli_config(
+                DummyConfig,
+                default_config=config_path,
+                args_list=[],
+            )
+            self.assertIsInstance(cfg_default, DummyConfig)
+
 
 if __name__ == '__main__':
     unittest.main()
