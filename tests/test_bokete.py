@@ -87,7 +87,7 @@ class TestBokete(unittest.TestCase):
             extra_metrics={"Convergence Speed": 0.2}
         )
 
-        self.assertIn("# Experiment Trial Report", md)
+        self.assertIn("# Experiment Report", md)
         self.assertIn("Final Train Loss", md)
         self.assertIn("Convergence Speed", md)
         self.assertIn("graph_1.png", md)
@@ -277,6 +277,42 @@ class TestBokete(unittest.TestCase):
                 args_list=[],
             )
             self.assertIsInstance(cfg_default, DummyConfig)
+
+    def test_experiment_report_directory_path(self):
+        import tempfile
+        from bokete import experiment_report, TrainingMetrics
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            metrics = TrainingMetrics(train_loss=[0.5, 0.3], val_loss=[0.6, 0.4])
+            config = {"experiment_name": "test_exp", "lr": 0.001}
+
+            # Pass Path object pointing to a directory
+            report_md = experiment_report(
+                config=config,
+                metrics=metrics,
+                save_path=tmp_path,
+                title="Test Report",
+            )
+            self.assertIn("Test Report", report_md)
+            self.assertTrue((tmp_path / "report.md").exists())
+            self.assertTrue((tmp_path / "graph.png").exists())
+
+    def test_create_run_directory(self):
+        import tempfile
+        from dataclasses import dataclass
+        from bokete import create_run_directory
+
+        @dataclass
+        class SampleConfig:
+            experiment_name: str = "my_experiment"
+            output_dir: str = ""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = SampleConfig(output_dir=tmpdir)
+            run_dir = create_run_directory(cfg, attach_file_logger=False)
+            self.assertTrue(run_dir.exists())
+            self.assertEqual(run_dir.parent.name, "my_experiment")
 
 
 if __name__ == '__main__':

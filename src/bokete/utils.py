@@ -113,54 +113,32 @@ def log_trial_start(trial_num: int, total_trials: int, name: str = "") -> None:
 
 
 def create_run_directory(
-    base_dir: str | Path | Any = "results",
-    experiment_name: Optional[str] = None,
-    dataset_name: Optional[str] = None,
-    attach_file_logger: bool = True,
     config: Optional[Any] = None,
+    base_dir: str | Path = "results",
+    experiment_name: Optional[str] = None,
+    attach_file_logger: bool = True,
 ) -> Path:
     """Creates a timestamped experiment directory (e.g. results/exp_name/YYYYMMDD-01)
     and optionally attaches a file logger (experiment.log) to the root logger.
 
-    Accepts a config dict/dataclass directly: `create_run_directory(cfg)`
+    Accepts a config dict/dataclass directly as first argument (`create_run_directory(cfg)`).
     """
-    if is_dataclass(base_dir) or isinstance(base_dir, dict) or hasattr(base_dir, "experiment_name"):
-        config = base_dir
-        base_dir = "results"
-
     if config is not None:
-        if base_dir == "results":
-            if hasattr(config, "output_dir") and getattr(config, "output_dir"):
-                base_dir = getattr(config, "output_dir")
-            elif hasattr(config, "base_dir") and getattr(config, "base_dir"):
-                base_dir = getattr(config, "base_dir")
-            elif isinstance(config, dict):
-                base_dir = config.get("output_dir") or config.get("base_dir") or "results"
+        if is_dataclass(config) or isinstance(config, dict):
+            if experiment_name is None:
+                experiment_name = getattr(config, "experiment_name", None) if is_dataclass(config) else config.get("experiment_name")
+            out = getattr(config, "output_dir", None) if is_dataclass(config) else config.get("output_dir")
+            if out and base_dir == "results":
+                base_dir = out
+        elif isinstance(config, (str, Path)) and base_dir == "results":
+            base_dir = config
 
-        if experiment_name is None:
-            if hasattr(config, "experiment_name"):
-                experiment_name = getattr(config, "experiment_name")
-            elif isinstance(config, dict):
-                experiment_name = config.get("experiment_name") or config.get("exp_name")
-        if dataset_name is None:
-            if hasattr(config, "dataset_name"):
-                dataset_name = getattr(config, "dataset_name")
-            elif hasattr(config, "dataset") and hasattr(config.dataset, "name"):
-                dataset_name = getattr(config.dataset, "name")
-            elif isinstance(config, dict):
-                d = config.get("dataset")
-                if isinstance(d, dict):
-                    dataset_name = d.get("name")
-                elif isinstance(d, str):
-                    dataset_name = d
+    subfolder = experiment_name or "experiment"
+    target_parent = Path(base_dir) / subfolder
+    target_parent.mkdir(parents=True, exist_ok=True)
 
-    base_path = Path(base_dir)
     now = datetime.now()
     date_prefix = now.strftime("%Y%m%d")
-
-    subfolder = experiment_name or dataset_name or "experiment"
-    target_parent = base_path / subfolder
-    target_parent.mkdir(parents=True, exist_ok=True)
 
     existing = [
         d for d in target_parent.iterdir()

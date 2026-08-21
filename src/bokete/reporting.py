@@ -8,12 +8,15 @@ Key Functions:
 
 from dataclasses import is_dataclass
 from datetime import datetime
+import logging
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
 
 from bokete.metrics import TrainingMetrics, training_report
 from bokete.plotting import plot_loss_curves
 from bokete.utils import flatten_dict
+
+logger = logging.getLogger(__name__)
 
 
 def experiment_report(
@@ -26,9 +29,15 @@ def experiment_report(
     title: Optional[str] = None,
     metrics: Optional[Union[TrainingMetrics, Dict[str, Any]]] = None,
     auto_plot: bool = True,
-    save_path: Optional[str] = None,
+    save_path: Optional[Union[str, Path]] = None,
 ) -> str:
     """Generates a structured GFM Markdown report string for an experiment run."""
+    # Resolve target output file and parent directory (handles directories and Path objects)
+    out_file: Optional[Path] = None
+    if save_path:
+        p = Path(save_path)
+        out_file = (p / "report.md") if (p.is_dir() or p.suffix == "" or not p.name.endswith(".md")) else p
+
     # Detect if a TrainingMetrics or metrics dict was passed as 2nd positional argument
     if hasattr(metrics_summary, 'train_loss') or (
         isinstance(metrics_summary, dict) and 'train_loss' in metrics_summary and 'final_train_loss' not in metrics_summary
@@ -51,7 +60,8 @@ def experiment_report(
                 val_loss = metrics.get('val_loss', [])
 
         if auto_plot and graph_filename:
-            plot_loss_curves(metrics=metrics, path=graph_filename, title=title or "Training and Validation Loss")
+            graph_path = (out_file.parent / graph_filename) if out_file else Path(graph_filename)
+            plot_loss_curves(metrics=metrics, path=graph_path, title=title or "Training and Validation Loss")
 
     metrics_summary = metrics_summary or {}
     train_loss = train_loss or []
@@ -64,13 +74,13 @@ def experiment_report(
     flat_config = flatten_dict(config)
     param_rows = "\n".join([f"| `{k}` | `{v}` |" for k, v in flat_config.items()])
 
-    exp_name = config.get('experiment_name') or config.get('exp_name') or config.get('name')
+    exp_name = config.get('experiment_name')
     if title:
         header_title = title
-    elif exp_name and exp_name != config.get('dataset'):
-        header_title = f"Experiment Trial Report: {exp_name}"
+    elif exp_name:
+        header_title = f"Experiment Report: {exp_name}"
     else:
-        header_title = "Experiment Trial Report"
+        header_title = "Experiment Report"
 
     # Build Trial Overview dynamically so it works across any PyTorch project
     overview_bullets = []
@@ -163,10 +173,10 @@ def experiment_report(
 
 </details>
 """
-    if save_path:
-        out_file = Path(save_path)
+    if out_file:
         out_file.parent.mkdir(parents=True, exist_ok=True)
         out_file.write_text(report_md, encoding="utf-8")
+        logger.info(f"[BOKeTE] Saved Experiment Report to: {out_file}")
 
     return report_md
 
@@ -174,16 +184,20 @@ def experiment_report(
 def multi_trial_report(
     config: Dict[str, Any],
     all_trial_metrics: List[Dict[str, Any]],
-    save_path: Optional[str] = None,
+    save_path: Optional[Union[str, Path]] = None,
 ) -> str:
     """Generates a structured GFM Markdown report summarizing a multi-trial experiment."""
     import numpy as np
 
+    out_file: Optional[Path] = None
+    if save_path:
+        p = Path(save_path)
+        out_file = (p / "multi_trial_report.md") if (p.is_dir() or p.suffix == "" or not p.name.endswith(".md")) else p
+
     best_val_losses = [min(m['val_loss']) for m in all_trial_metrics if m and 'val_loss' in m and m['val_loss']]
     if not best_val_losses:
         report_md = "# Multi-Trial Experiment Summary\n\nNo trial metrics recorded."
-        if save_path:
-            out_file = Path(save_path)
+        if out_file:
             out_file.parent.mkdir(parents=True, exist_ok=True)
             out_file.write_text(report_md, encoding="utf-8")
         return report_md
@@ -231,9 +245,9 @@ def multi_trial_report(
 | :--- | :--- |
 {param_rows}
 """
-    if save_path:
-        out_file = Path(save_path)
+    if out_file:
         out_file.parent.mkdir(parents=True, exist_ok=True)
         out_file.write_text(report_md, encoding="utf-8")
+        logger.info(f"[BOKeTE] Saved Multi-Trial Report to: {out_file}")
 
     return report_md

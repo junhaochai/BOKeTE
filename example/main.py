@@ -56,11 +56,8 @@ def main() -> None:
         num_classes=cfg.model.num_classes,
     ).to(device)
     
-    loss_cls = getattr(nn, cfg.training.loss)
-    criterion = loss_cls()
-
-    opt_cls = getattr(torch.optim, cfg.training.optimizer)
-    optimizer = opt_cls(model.parameters(), lr=cfg.training.lr)
+    criterion = getattr(nn, cfg.training.loss)()
+    optimizer = getattr(torch.optim, cfg.training.optimizer)(model.parameters(), lr=cfg.training.lr)
 
     # 6. Train Model via Trainer Wrapper
     trainer = bokete.Trainer(model, criterion, optimizer, device=device)
@@ -69,19 +66,15 @@ def main() -> None:
         val_loader=val_loader,
         epochs=cfg.training.epochs,
         early_stopping=bokete.EarlyStopping(patience=cfg.training.patience),
-        checkpoint=bokete.Checkpoint(directory=run_dir / "checkpoints"),
+        checkpoint=bokete.Checkpoint(run_dir / "checkpoints"),
     )
 
     # 7. Generate & Save Markdown Report + Loss Graph PNG/HTML
-    report_path = run_dir / "report.md"
     bokete.experiment_report(
         config=cfg,
         metrics=history,
-        save_path=str(report_path),
-        title="MNIST MLP Training Run Demo",
+        save_path=run_dir,
     )
-
-    print(f"[BOKeTE] Run complete! Saved report to: {report_path}")
 
 
 if __name__ == "__main__":
