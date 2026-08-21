@@ -10,28 +10,18 @@ Key Functions:
 import copy
 import itertools
 import logging
-import os
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Callable, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import torch
 
-from bokete.reporting import experiment_report, multi_trial_report
-from bokete.training import Trainer, EarlyStopping, Checkpoint
-from bokete.utils import (
-    close_file_loggers,
-    create_run_directory,
-    determine_device,
-    format_duration,
-    get_nested_key,
-    log_trial_start,
-    set_nested_key,
-    set_seed,
-    setup_logging,
-)
+import bokete.reporting as reporting
+import bokete.training as training
+import bokete.utils as utils
+
 
 logger = logging.getLogger(__name__)
 
@@ -49,78 +39,79 @@ def _run_trials(
         raise ValueError("Configuration must explicitly define 'experiment_name'.")
 
     if output_dir is None:
-        run_dir_path = create_run_directory(config, attach_file_logger=True)
+        run_dir_path = utils.create_run_directory(config, attach_file_logger=True)
         output_dir = str(run_dir_path)
     else:
-        setup_logging(log_file=Path(output_dir) / "experiment.log")
+        utils.setup_logging(log_file=Path(output_dir) / "experiment.log")
 
-    setup_logging()
-    all_metrics = []
+    utils.setup_logging()
+    all_trial_metrics = []
 
     start_dt = datetime.now()
-    start_time_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+    start_time = start_dt.strftime("%Y-%m-%d %H:%M:%S")
     t0 = time.time()
 
     try:
         base_seed = config.get("seed", 42) if isinstance(config, dict) else getattr(config, "seed", 42)
         for i in range(1, num_trials + 1):
-            trial_seed = base_seed + (i - 1)
-            log_trial_start(i, num_trials, exp_label, seed=trial_seed)
-            try:
-                metrics = run_fn(i, config, output_dir=output_dir)
-            except TypeError:
-                try:
-                    metrics = run_fn(i, config)
-                except TypeError:
-                    metrics = run_fn(config)
+            metrics = run_fn(i, config, output_dir=output_dir, total_trials=num_trials)
             if metrics:
-                all_metrics.append(metrics)
+                all_trial_metrics.append(metrics)
                 val_losses = metrics.get('val_loss') or []
                 if val_losses:
                     best_val = min(val_losses)
-                    logger.info(f"[BOKeTE] Trial {i} complete — Best Val Loss: {best_val:.4f}")
+                    logger.info("")
+                    logger.info(f"[BOKeTE] Trial {i} complete — Best Val Loss: {utils.Colours.BRIGHT_CYAN}{best_val:.4f}{utils.Colours.RESET}")
                 else:
+                    logger.info("")
                     logger.info(f"[BOKeTE] Trial {i} complete")
     except KeyboardInterrupt:
-        logger.warning("")
-        logger.warning("[BOKeTE] Multi-trial run cancelled by user (KeyboardInterrupt). Finalizing completed trials...")
-        logger.warning("")
+        # User interrupted trial sweep; warning is logged inside Trainer.fit().
+        # Proceed to finally block to flush loggers and report completed trials.
+        pass
     finally:
-        close_file_loggers()
+        utils.close_file_loggers()
 
     t1 = time.time()
     end_dt = datetime.now()
-    end_time_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
-    total_duration = round(t1 - t0, 2)
+    end_time = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+    duration_seconds = round(t1 - t0, 2)
 
-    if output_dir and all_metrics:
-        multi_trial_report(
-            config,
-            all_metrics,
+    # Guard: Ensure output directory exists and metrics were produced before generating report
+    # (prevents errors on empty runs and enables partial reports for completed trials on KeyboardInterrupt)
+    if output_dir and all_trial_metrics:
+        logger.info("")
+        reporting.multi_trial_report(
+            config=config,
+            all_trial_metrics=all_trial_metrics,
             save_path=output_dir,
-            start_time=start_time_str,
-            end_time=end_time_str,
-            duration_seconds=total_duration,
+            start_time=start_time,
+            end_time=end_time,
+            duration_seconds=duration_seconds,
             model=model,
         )
 
     # Log summary statistics if validation losses were recorded
-    best_val_losses = [min(m['val_loss']) for m in all_metrics if m and 'val_loss' in m and m['val_loss']]
+    best_val_losses = [min(m['val_loss']) for m in all_trial_metrics if m and 'val_loss' in m and m['val_loss']]
     if best_val_losses:
         mean_val = float(np.mean(best_val_losses))
         std_val = float(np.std(best_val_losses))
         min_val = float(np.min(best_val_losses))
         max_val = float(np.max(best_val_losses))
-        summary_label = f" for [{exp_label}]" if exp_label else ""
+        summary_label = f" for {utils.format_tag(exp_label)}" if exp_label else ""
         logger.info("")
         logger.info(
             f"[BOKeTE] === Experiment Complete{summary_label} ({len(best_val_losses)} Trials) | "
-            f"Time Taken: {format_duration(total_duration)} (Start: {start_time_str}, End: {end_time_str}) ==="
+            f"Time Taken: {utils.Colours.BRIGHT_CYAN}{utils.format_duration(duration_seconds)}{utils.Colours.RESET} "
+            f"(Start: {start_time}, End: {end_time}) ==="
         )
-        logger.info(f"[BOKeTE] Mean Best Val Loss: {mean_val:.4f} ± {std_val:.4f} (Min: {min_val:.4f}, Max: {max_val:.4f})")
+        logger.info(
+            f"[BOKeTE] Mean Best Val Loss: {utils.Colours.BRIGHT_CYAN}{mean_val:.4f} ± {std_val:.4f}{utils.Colours.RESET} "
+            f"(Min: {utils.Colours.CYAN}{min_val:.4f}{utils.Colours.RESET}, Max: {utils.Colours.CYAN}{max_val:.4f}{utils.Colours.RESET})"
+        )
         logger.info("")
 
-    return all_metrics
+    return all_trial_metrics
 
 
 def run_experiments(
@@ -165,15 +156,17 @@ def run_experiments(
 
         n_trials = num_trials or (base_cfg.get("trials", 1) if isinstance(base_cfg, dict) else getattr(base_cfg, "trials", 1))
 
+        exp_name = target_config.get("experiment_name") if isinstance(target_config, dict) else getattr(target_config, "experiment_name", None)
+
         for idx, combo in enumerate(value_combinations, 1):
             run_config = copy.deepcopy(base_cfg)
             params_used = {}
             for key, value in zip(keys, combo):
-                set_nested_key(run_config, key, value)
+                utils.set_nested_key(run_config, key, value)
                 params_used[key] = value
 
             params_str = ", ".join([f"{k}={v}" for k, v in params_used.items()])
-            log_trial_start(idx, total, params_str)
+            utils.log_experiment_start(idx, total, exp_name, params_str=params_str)
 
             trial_metrics = _run_trials(
                 config=run_config,
@@ -219,14 +212,15 @@ def create_trial_runner(
     Returns:
         A callback `(trial_num, config, output_dir=None) -> metrics_dict` compatible with bokete.run_experiments.
     """
-    def run_fn(trial_num: int, config: Dict[str, Any], output_dir: Optional[str] = None) -> Dict[str, Any]:
+    def run_fn(trial_num: int, config: Dict[str, Any], output_dir: Optional[str] = None, total_trials: int = 1) -> Dict[str, Any]:
         exp_name = config.get("experiment_name") if isinstance(config, dict) else getattr(config, "experiment_name", None)
         if not exp_name or not str(exp_name).strip():
             raise ValueError("Configuration must explicitly define 'experiment_name'.")
 
         # 1. Set seed per trial for stochastic variance
         base_seed = config.get("seed", 42)
-        set_seed(base_seed + (trial_num - 1))
+        trial_seed = base_seed + (trial_num - 1)
+        utils.set_seed(trial_seed)
 
         # 2. Build dataloaders & model
         train_loader, val_loader, *test = loader_factory(config)
@@ -238,23 +232,23 @@ def create_trial_runner(
         if criterion_factory:
             criterion = criterion_factory(config)
         else:
-            loss_name = get_nested_key(config, "training.loss") or "CrossEntropyLoss"
+            loss_name = utils.get_nested_key(config, "training.loss") or "CrossEntropyLoss"
             criterion = getattr(torch.nn, loss_name)()
 
         if optimizer_factory:
             optimizer = optimizer_factory(model, config)
         else:
-            opt_name = get_nested_key(config, "training.optimizer") or "Adam"
-            lr = get_nested_key(config, "training.lr") or 1e-3
+            opt_name = utils.get_nested_key(config, "training.optimizer") or "Adam"
+            lr = utils.get_nested_key(config, "training.lr") or 1e-3
             opt_cls = getattr(torch.optim, opt_name)
             optimizer = opt_cls(model.parameters(), lr=lr)
 
         # 4. Determine device & run Trainer (log device and structure on trial 1)
         is_first_trial = (trial_num == 1)
-        device = determine_device(verbose=is_first_trial)
+        device = utils.determine_device(verbose=is_first_trial)
         should_log_struct = log_model_structure and is_first_trial
 
-        trainer = Trainer(
+        trainer = training.Trainer(
             model,
             criterion,
             optimizer,
@@ -262,24 +256,30 @@ def create_trial_runner(
             log_model_structure=should_log_struct,
         )
 
-        epochs = get_nested_key(config, "training.epochs") or 5
-        patience = get_nested_key(config, "training.patience")
-        early_stopping_obj = EarlyStopping(patience=patience) if patience is not None and patience > 0 else None
-        save_ckpts = get_nested_key(config, "training.save_checkpoints")
+        # 5. Log trial start header right before starting training loop
+        utils.log_trial_start(trial_num, total_trials, exp_name, seed=trial_seed)
+
+        epochs = utils.get_nested_key(config, "training.epochs") or 5
+        patience = utils.get_nested_key(config, "training.patience")
+        early_stopping_obj = training.EarlyStopping(patience=patience) if patience is not None and patience > 0 else None
+        save_ckpts = utils.get_nested_key(config, "training.save_checkpoints")
         if save_ckpts is None:
             save_ckpts = True
 
         if not output_dir:
-            output_dir = str(create_run_directory(config, attach_file_logger=False))
+            output_dir = str(utils.create_run_directory(config, attach_file_logger=False))
 
         trial_dir = Path(output_dir) / f"trial_{trial_num}"
+
+        log_interval = utils.get_nested_key(config, "training.log_interval") or 1
 
         history = trainer.fit(
             train_loader=train_loader,
             val_loader=val_loader,
             epochs=epochs,
             early_stopping=early_stopping_obj,
-            checkpoint=Checkpoint(trial_dir / "checkpoints", enabled=save_ckpts),
+            checkpoint=training.Checkpoint(trial_dir / "checkpoints", enabled=save_ckpts),
+            log_interval=log_interval,
         )
 
         # 5. Evaluate post-training test metrics if test_fn provided
@@ -288,7 +288,7 @@ def create_trial_runner(
             extra_metrics = test_fn(model, test_loader, config) if test_loader is not None else test_fn(model, config)
 
         # 6. Generate per-trial Markdown report
-        experiment_report(
+        reporting.experiment_report(
             config=config,
             metrics=history,
             model=model,

@@ -82,7 +82,7 @@ class TestExperiments(unittest.TestCase):
         base_config = {"experiment_name": "exp_sweep", "training": {"lr": 0.01, "epochs": 1}}
         param_grid = {"training.lr": [0.01, 0.001]}
 
-        def dummy_run_fn(config):
+        def dummy_run_fn(trial_num, config, **kwargs):
             return {"train_loss": [0.5], "val_loss": [0.6]}
 
         results = run_experiments(base_config, param_grid, dummy_run_fn)
@@ -94,7 +94,7 @@ class TestExperiments(unittest.TestCase):
         base_config = {"experiment_name": "exp_sweep", "model": {"layer_sizes": [128, 64]}}
         param_grid = {"model.layer_sizes": [[256, 128], [512, 256, 128]]}
 
-        def dummy_run_fn(config):
+        def dummy_run_fn(trial_num, config, **kwargs):
             return {"train_loss": [0.5]}
 
         results = run_experiments(base_config, param_grid, dummy_run_fn)
@@ -105,7 +105,7 @@ class TestExperiments(unittest.TestCase):
     def test_run_trials(self):
         config = {"experiment_name": "trial_test", "training": {"epochs": 1}}
 
-        def dummy_trial_fn(trial_num, cfg):
+        def dummy_trial_fn(trial_num, cfg, **kwargs):
             return {"train_loss": [0.5], "val_loss": [0.6]}
 
         with tempfile.TemporaryDirectory() as tmpdir:

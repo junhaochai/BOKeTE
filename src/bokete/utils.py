@@ -22,22 +22,133 @@ from datetime import datetime
 import logging
 import os
 import random
+import sys
 from pathlib import Path
-from typing import Dict, Any, Optional, Sequence, Type, TypeVar
+from typing import Dict, Any, Optional, Sequence, Type, TypeVar, Union
 
 import numpy as np
 import torch
+import re
+import tqdm
 import yaml
 
 logger = logging.getLogger(__name__)
 
 
+
+class TqdmLoggingHandler(logging.StreamHandler):
+    """Logging handler that routes console messages through tqdm.write() to prevent progress bar line collisions."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+            if msg is not None:
+                tqdm.tqdm.write(msg, file=self.stream)
+                self.flush()
+        except Exception:
+            self.handleError(record)
+
+
+# Design System Tokens & Formatting Helpers
+class Colours:
+    """Design System ANSI Colour Tokens for console formatting."""
+    RESET = "\033[0m"
+    NAVY = "\033[34m"
+    ROYAL_BLUE = "\033[94m"
+    CYAN = "\033[36m"
+    BRIGHT_CYAN = "\033[96m"
+    BOLD_CYAN = "\033[1;36m"
+
+
+# Backwards-compatible aliases
+ANSI_RESET = Colours.RESET
+ANSI_NAVY = Colours.NAVY
+ANSI_ROYAL_BLUE = Colours.ROYAL_BLUE
+ANSI_CYAN = Colours.CYAN
+ANSI_BRIGHT_CYAN = Colours.BRIGHT_CYAN
+ANSI_BOLD_CYAN = Colours.BOLD_CYAN
+
+
+
+
+def format_epoch_label(current: int, total: int) -> str:
+    """Formats 'Epoch X/Y' with current in Electric Cyan, slash in white, and total in Soft Royal Blue."""
+    return f"Epoch {ANSI_BRIGHT_CYAN}{current}{ANSI_RESET}/{ANSI_ROYAL_BLUE}{total}{ANSI_RESET}"
+
+
+def format_tag(text: str) -> str:
+    """Formats a bracketed tag '[text]' in Electric Cyan."""
+    return f"{ANSI_BRIGHT_CYAN}[{text}]{ANSI_RESET}"
+
+
 class BOKeTEFormatter(logging.Formatter):
-    """Custom logging formatter that emits clean unformatted blank lines when message is empty."""
+    """Custom logging formatter using Navy Blue grounding with Electric Cyan metric highlights for TTY terminals.
+
+    Strips ANSI control codes for file loggers (experiment.log) and aligns multi-line log records.
+    """
+
+    RESET = "\033[0m"
+
+    # Navy / Royal Blue palette (grounding tones for structural elements, timestamps & headers)
+    NAVY = "\033[34m"            # Standard Navy Blue (timestamps & boundaries)
+    ROYAL_BLUE = "\033[94m"      # Bright Royal Blue (distinct badge for [INFO])
+    BOLD_NAVY = "\033[1;34m"      # Bold Navy Blue (warnings & errors)
+    DIM_NAVY = "\033[2;34m"       # Subdued Navy Blue
+
+    # Cyan palette (vibrant highlights for active tags & metrics)
+    CYAN = "\033[36m"            # Standard Cyan
+    BRIGHT_CYAN = "\033[96m"     # Electric Cyan
+    BOLD_CYAN = "\033[1;36m"     # Bold Electric Cyan
+
+    # Pattern to strip ANSI color escape codes for disk log files
+    ANSI_REGEX = re.compile(r"\033\[[0-9;]*m")
+
+    def __init__(
+        self,
+        fmt: str = "%(asctime)s [%(levelname)s] %(message)s",
+        datefmt: str = "%Y-%m-%d %H:%M:%S",
+        use_colors: bool = False,
+    ):
+        super().__init__(fmt, datefmt)
+        self.use_colors = use_colors
+
     def format(self, record: logging.LogRecord) -> str:
         if not record.msg or record.msg == "\n":
             return ""
-        return super().format(record)
+
+        orig_msg = record.getMessage()
+
+        if self.use_colors:
+            levelname = record.levelname
+            if levelname == "INFO":
+                colored_level = f"{self.ROYAL_BLUE}[INFO]{self.RESET}"
+            elif levelname in ("WARNING", "ERROR", "CRITICAL"):
+                colored_level = f"{self.BOLD_NAVY}[{levelname}]{self.RESET}"
+            else:
+                colored_level = f"[{levelname}]"
+
+            asctime = self.formatTime(record, self.datefmt)
+            prefix = f"{self.NAVY}{asctime}{self.RESET} {colored_level} "
+
+            msg = orig_msg.replace("[BOKeTE]", f"{self.BOLD_CYAN}[BOKeTE]{self.RESET}")
+            if ":" in orig_msg and not orig_msg.startswith("---"):
+                parts = msg.split(":", 1)
+                if len(parts) == 2 and parts[1].strip() and "\n" not in parts[1]:
+                    msg = f"{parts[0]}:{self.ROYAL_BLUE}{parts[1]}{self.RESET}"
+
+            formatted = f"{prefix}{msg}"
+        else:
+            formatted = super().format(record)
+            formatted = self.ANSI_REGEX.sub("", formatted)
+
+        # Multi-line handling: align subsequent lines under log record body
+        if "\n" in formatted:
+            lines = formatted.splitlines()
+            header_len = len(self.formatTime(record, self.datefmt)) + len(record.levelname) + 4
+            indent = " " * header_len
+            return lines[0] + "\n" + "\n".join(indent + line for line in lines[1:])
+
+        return formatted
 
 
 def set_seed(seed: int, deterministic: bool = False) -> None:
@@ -103,11 +214,32 @@ def determine_device(verbose: bool = True) -> torch.device:
     return dev
 
 
+def resolve_config_path(config_path: str | Path) -> Path:
+    """Resolves a config path, auto-appending .yaml for short names inside the configs/ directory."""
+    p = Path(config_path)
+    name = f"{p.stem}.yaml" if not p.suffix else p.name
+    candidates = [Path("configs") / name, p]
+    return next((c for c in candidates if c.is_file()), p)
+
+
+def resolve_output_path(
+    save_path: Optional[Union[str, Path]], filename: str
+) -> Optional[Path]:
+    """Resolves output target Path for saved reports, plots, or artifact files."""
+    if not save_path:
+        return None
+    target_path = Path(save_path)
+    return target_path / filename if (target_path.is_dir() or not target_path.suffix) else target_path
+
+
+
+
+
 def load_config(config_path: str | Path) -> Dict[str, Any]:
     """Loads a YAML configuration file into a dictionary and logs the event."""
-    path = Path(config_path)
+    path = resolve_config_path(config_path)
     if not path.exists():
-        raise FileNotFoundError(f"Configuration file not found at: {path}")
+        raise FileNotFoundError(f"Configuration file not found at: {config_path}")
 
     if path.suffix.lower() not in (".yaml", ".yml"):
         raise ValueError(
@@ -154,7 +286,31 @@ def log_trial_start(trial_num: int, total_trials: int, experiment_name: str, see
     clean_name = str(experiment_name).strip()
     seed_str = f" (Seed: {seed})" if seed is not None else ""
     logger.info("")
-    logger.info(f"[BOKeTE] --- Starting Trial {trial_num}/{total_trials} [{clean_name}]{seed_str} ---")
+    logger.info(f"[BOKeTE] --- Starting Trial {trial_num}/{total_trials} {format_tag(clean_name)}{seed_str} ---")
+
+
+def log_experiment_start(
+    experiment_num: int,
+    total_experiments: int,
+    experiment_name: str,
+    params_str: Optional[str] = None,
+) -> None:
+    """Logs a standardized experiment section header for multi-config runs."""
+    if not experiment_name or not str(experiment_name).strip():
+        raise ValueError(
+            "An experiment_name must be provided to log_experiment_start(). "
+            "Got empty or invalid experiment name."
+        )
+
+    clean_name = str(experiment_name).strip()
+    p_str = f" ({params_str})" if params_str and str(params_str).strip() else ""
+    logger.info("")
+    logger.info(
+        f"[BOKeTE] --- Starting Experiment {experiment_num}/{total_experiments} "
+        f"{format_tag(clean_name)}{p_str} ---"
+    )
+
+
 
 
 def log_model_info(
@@ -179,7 +335,9 @@ def log_model_info(
     )
 
     if log_layers or logger.isEnabledFor(logging.DEBUG):
+        logger.info("")
         logger.info(f"[BOKeTE] Model layer structure:\n{structure_str}")
+        logger.info("")
 
     return {
         "model_name": model_name,
@@ -187,7 +345,6 @@ def log_model_info(
         "trainable_params": trainable_params,
         "structure": structure_str,
     }
-
 
 
 def setup_logging(
@@ -200,16 +357,16 @@ def setup_logging(
     if root_logger.level == logging.NOTSET or root_logger.level > level:
         root_logger.setLevel(level)
 
-    formatter = BOKeTEFormatter("%(asctime)s [%(levelname)s] %(message)s", "%Y-%m-%d %H:%M:%S")
-
     if console:
         has_console = any(
             isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
             for h in root_logger.handlers
         )
         if not has_console:
-            ch = logging.StreamHandler()
-            ch.setFormatter(formatter)
+            ch = TqdmLoggingHandler()
+            is_tty = hasattr(ch.stream, "isatty") and ch.stream.isatty()
+            console_formatter = BOKeTEFormatter(use_colors=is_tty)
+            ch.setFormatter(console_formatter)
             root_logger.addHandler(ch)
 
     if log_file:
@@ -221,11 +378,38 @@ def setup_logging(
         )
         if not already_attached:
             fh = logging.FileHandler(file_path, mode="a", encoding="utf-8")
-            fh.setFormatter(formatter)
+            file_formatter = BOKeTEFormatter(use_colors=False)
+            fh.setFormatter(file_formatter)
             root_logger.addHandler(fh)
 
-    for h in root_logger.handlers:
-        h.setFormatter(formatter)
+
+def create_progress_bar(
+    iterable: Any = None,
+    desc: str = "",
+    total: Optional[int] = None,
+    leave: bool = False,
+    disable: bool = False,
+    dynamic_ncols: bool = True,
+    mininterval: float = 0.1,
+    **kwargs: Any,
+) -> tqdm.tqdm:
+    """Creates a standard tqdm progress bar with slim horizontal bar styling ('━') and Navy Blue tinting."""
+    kwargs.setdefault("ascii", " ━")
+    kwargs.setdefault(
+        "bar_format",
+        "{desc}: {percentage:3.0f}%|\033[34m{bar}\033[0m| "
+        "{n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]",
+    )
+    return tqdm.tqdm(
+        iterable,
+        desc=desc,
+        total=total,
+        leave=leave,
+        disable=disable,
+        dynamic_ncols=dynamic_ncols,
+        mininterval=mininterval,
+        **kwargs,
+    )
 
 
 def close_file_loggers() -> None:

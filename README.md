@@ -42,6 +42,7 @@ All core primitives are exported at the root package level (`from bokete import 
 | Function / Class | Module | Description |
 | :--- | :--- | :--- |
 | `load_config(config_path)` | `bokete.utils` | Loads a `.yaml`, `.yml`, or `.json` file into a dictionary with standardized logging. |
+| `resolve_config_path(path)` | `bokete.utils` | Resolves config paths inside `configs/` directory (auto-appending `.yaml` for short names). |
 | `set_seed(seed, deterministic=False)` | `bokete.training` | Seeds Python, NumPy, and PyTorch (CPU/CUDA) for reproducibility. |
 | `determine_device()` | `bokete.training` | Detects best available hardware device (`cuda`, `mps`, or `cpu`). |
 | `Trainer(...)` | `bokete.training` | Main training loop wrapper with AMP mixed-precision, auto-cuDNN benchmarking & gradient clipping. |
@@ -52,8 +53,7 @@ All core primitives are exported at the root package level (`from bokete import 
 | `experiment_report(...)` | `bokete.reporting` | Generates a structured GFM Markdown trial report string with dynamic overview metadata. |
 | `multi_trial_report(...)` | `bokete.reporting` | Generates a combined GFM Markdown summary report string across multiple experiment trials. |
 | `log_trial_start(...)` | `bokete.utils` | Logs a standardized trial header with clean unformatted console spacing. |
-| `run_trials(...)` | `bokete.experiments` | Orchestrates multi-trial runs with clean logging, Ctrl+C cancellation, and auto-report saving. |
-| `run_experiments(...)` | `bokete.experiments` | Executes grid search parameter sweeps across configuration paths. |
+| `run_experiments(...)` | `bokete.experiments` | Primary top-level entry point for single-trial runs, multi-trial runs, and grid search sweeps. |
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -179,6 +179,20 @@ bokete.experiment_report(
     title="Minimal Training Run"
 )
 ```
+
+### 3.3 Running the Included Starter Template (`example/`)
+
+The repository includes a ready-to-run starter template under [`example/`](file:///D:/la-mudanza/BoKeTE/example/main.py) demonstrating `bokete.parse_cli_config`, `bokete.create_trial_runner`, and `bokete.run_experiments`.
+
+Execute the starter template directly with `uv`:
+
+```bash
+uv --directory example run python main.py --config example
+```
+
+*(Or from inside `example/`: `uv run python main.py --config example`)*
+
+To trigger an automated hyperparameter grid sweep, uncomment `param_grid` in [`example/configs/example.yaml`](file:///D:/la-mudanza/BoKeTE/example/configs/example.yaml).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

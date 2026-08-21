@@ -9,16 +9,24 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
+from unittest.mock import patch, MagicMock
+
 from bokete.utils import (
+    create_progress_bar,
     create_run_directory,
     determine_device,
     format_duration,
+    format_epoch_label,
+    format_tag,
     get_device_name,
     get_nested_key,
     load_config_as,
+    log_experiment_start,
     log_model_info,
     log_trial_start,
     parse_cli_config,
+    resolve_config_path,
+    resolve_output_path,
     set_seed,
     setup_logging,
 )
@@ -103,6 +111,26 @@ class TestUtils(unittest.TestCase):
             )
             self.assertIsInstance(cfg_default, DummyConfig)
 
+    def test_resolve_config_path(self):
+        # 1. Exact path resolution
+        resolved = resolve_config_path("example/configs/example.yaml")
+        self.assertEqual(resolved, Path("example/configs/example.yaml"))
+
+        # 2. Short name / configs/ folder resolution via mocking
+        with patch.object(Path, "is_file", side_effect=lambda: True):
+            res_short = resolve_config_path("example")
+            self.assertEqual(res_short, Path("configs/example.yaml"))
+
+    def test_resolve_output_path(self):
+        self.assertIsNone(resolve_output_path(None, "report.md"))
+        self.assertEqual(resolve_output_path("custom/report.md", "report.md"), Path("custom/report.md"))
+        self.assertEqual(resolve_output_path("custom_dir", "report.md"), Path("custom_dir/report.md"))
+
+    def test_create_progress_bar(self):
+        pbar = create_progress_bar(range(10), desc="Testing", disable=True)
+        self.assertIsNotNone(pbar)
+        pbar.close()
+
     def test_create_run_directory(self):
         from dataclasses import dataclass
 
@@ -141,6 +169,13 @@ class TestUtils(unittest.TestCase):
         with self.assertRaises(ValueError):
             log_trial_start(1, 5, None)  # type: ignore
 
+    def test_log_experiment_start(self):
+        log_experiment_start(1, 4, "exp_sweep", params_str="training.lr=0.01, training.batch_size=32")
+        with self.assertRaises(ValueError):
+            log_experiment_start(1, 4, "")
+
+
+
     def test_setup_logging(self):
         import logging
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -159,6 +194,15 @@ class TestUtils(unittest.TestCase):
                 if isinstance(h, logging.FileHandler):
                     h.close()
                     root_logger.removeHandler(h)
+
+    def test_design_system_helpers(self):
+        epoch_str = format_epoch_label(1, 5)
+        self.assertIn("Epoch", epoch_str)
+        self.assertIn("1", epoch_str)
+        self.assertIn("5", epoch_str)
+
+        tag_str = format_tag("test_exp")
+        self.assertIn("[test_exp]", tag_str)
 
 
 if __name__ == "__main__":

@@ -6,55 +6,99 @@ Key Functions:
   - multi_trial_report: Aggregates statistics across multiple experimental trial runs.
 """
 
-from dataclasses import is_dataclass
+from dataclasses import asdict, is_dataclass
 from datetime import datetime
 import logging
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
 
-from bokete.metrics import TrainingMetrics, training_report
-from bokete.plotting import plot_loss_curves, plot_multi_trial_loss_curves
-from bokete.utils import flatten_dict
+import numpy as np
+import torch
+
+import bokete.metrics as metrics_mod
+import bokete.plotting as plotting
+import bokete.utils as utils
+
 
 logger = logging.getLogger(__name__)
 
 
+
+def _write_report(out_file: Optional[Path], report_md: str) -> None:
+    """Writes report string to out_file and logs completion."""
+    if out_file:
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text(report_md, encoding="utf-8")
+        logger.info(f"[BOKeTE] Saved Report to: {out_file}")
+
+
+def _resolve_device_string(
+    config: Dict[str, Any], explicit_device: Optional[str] = None
+) -> str:
+    """Formats execution device string from summary metric or config."""
+    if explicit_device:
+        return explicit_device
+    dev_cfg = config.get("device")
+    dev_obj = torch.device(dev_cfg) if dev_cfg else utils.determine_device(verbose=False)
+    dev_gpu = utils.get_device_name(dev_obj)
+    if dev_gpu and dev_gpu.lower() != dev_obj.type.lower():
+        return f"{dev_obj} ({dev_gpu})"
+    return str(dev_obj)
+
+
+def _format_config_table(config: Any) -> tuple[Dict[str, Any], str]:
+    """Converts dataclass config to dict if needed and returns (dict_config, param_rows_markdown)."""
+    cfg_dict = asdict(config) if is_dataclass(config) else (config or {})
+    flat = utils.flatten_dict(cfg_dict)
+    rows = "\n".join([f"| `{k}` | `{v}` |" for k, v in flat.items()])
+    return cfg_dict, rows
+
+
+def _extract_model_info(model: Any) -> tuple[str, int, int, str]:
+    """Extracts (model_name, total_params, trainable_params, structure_str) from a model object or dict."""
+    # Active PyTorch model instance (nn.Module, DataParallel, or DDP)
+    if hasattr(model, "parameters"):
+        raw_model = getattr(model, "module", model)
+        total_params = sum(p.numel() for p in raw_model.parameters())
+        trainable_params = sum(p.numel() for p in raw_model.parameters() if p.requires_grad)
+        return raw_model.__class__.__name__, total_params, trainable_params, str(raw_model)
+
+    # Loaded PyTorch checkpoint or model metadata dictionary
+    if isinstance(model, dict):
+        missing = [k for k in ("model_name", "total_params", "trainable_params") if k not in model]
+        if missing:
+            raise ValueError(f"Model checkpoint dictionary missing required key(s): {', '.join(missing)}")
+        return str(model["model_name"]), int(model["total_params"]), int(model["trainable_params"]), str(model.get("structure", ""))
+
+    # Invalid model input (neither a PyTorch model nor a checkpoint dict)
+    raise ValueError(
+        f"Invalid model object of type '{type(model).__name__}'. "
+        "Expected a PyTorch nn.Module or a model metadata dictionary."
+    )
+
+
 def _format_model_section(model: Optional[Any]) -> tuple[str, str]:
     """Extracts model details and returns formatted (overview_bullet, markdown_section)."""
+    # No model object passed to report generator
     if model is None:
         return "", ""
 
-    if hasattr(model, "parameters"):
-        raw_m = getattr(model, "module", model)
-        m_name = raw_m.__class__.__name__
-        tot_p = sum(p.numel() for p in raw_m.parameters())
-        trn_p = sum(p.numel() for p in raw_m.parameters() if p.requires_grad)
-        struct_str = str(raw_m)
-    elif isinstance(model, dict):
-        m_name = model.get("model_name", "PyTorch Model")
-        tot_p = model.get("total_params", 0)
-        trn_p = model.get("trainable_params", 0)
-        struct_str = model.get("structure", "")
-    else:
-        m_name = getattr(model, "__class__", type(model)).__name__
-        tot_p = 0
-        trn_p = 0
-        struct_str = str(model)
+    model_name, total_params, trainable_params, structure_str = _extract_model_info(model)
 
-    bullet = f"- **Model Architecture:** `{m_name}` (`{tot_p:,}` total params | `{trn_p:,}` trainable)"
+    bullet = f"- **Model Architecture:** `{model_name}` (`{total_params:,}` total params | `{trainable_params:,}` trainable)"
 
     layer_block = ""
-    if struct_str:
+    if structure_str:
         layer_block = (
             f"\n<details>\n<summary><b>View Model Layer Hierarchy</b></summary>\n\n"
-            f"```text\n{struct_str}\n```\n\n</details>\n"
+            f"```text\n{structure_str}\n```\n\n</details>\n"
         )
 
     section = (
         f"\n## Model Architecture\n"
-        f"- **Model Class:** `{m_name}`\n"
-        f"- **Total Parameters:** `{tot_p:,}`\n"
-        f"- **Trainable Parameters:** `{trn_p:,}`\n"
+        f"- **Model Class:** `{model_name}`\n"
+        f"- **Total Parameters:** `{total_params:,}`\n"
+        f"- **Trainable Parameters:** `{trainable_params:,}`\n"
         f"{layer_block}"
     )
 
@@ -69,17 +113,13 @@ def experiment_report(
     graph_filename: Optional[str] = "graph.png",
     extra_metrics: Optional[Dict[str, Any]] = None,
     title: Optional[str] = None,
-    metrics: Optional[Union[TrainingMetrics, Dict[str, Any]]] = None,
+    metrics: Optional[Union[metrics_mod.TrainingMetrics, Dict[str, Any]]] = None,
     auto_plot: bool = True,
     save_path: Optional[Union[str, Path]] = None,
     model: Optional[Any] = None,
 ) -> str:
     """Generates a structured GFM Markdown report string for an experiment run."""
-    # Resolve target output file and parent directory (handles directories and Path objects)
-    out_file: Optional[Path] = None
-    if save_path:
-        p = Path(save_path)
-        out_file = (p / "report.md") if (p.is_dir() or p.suffix == "" or not p.name.endswith(".md")) else p
+    out_file = utils.resolve_output_path(save_path, "report.md")
 
     # Detect if a TrainingMetrics or metrics dict was passed as 2nd positional argument
     if hasattr(metrics_summary, 'train_loss') or (
@@ -89,35 +129,25 @@ def experiment_report(
         metrics_summary = None
 
     if metrics is not None:
+        m = metrics if isinstance(metrics, dict) else metrics.as_dict()
         if metrics_summary is None:
-            metrics_summary = training_report(metrics)
+            metrics_summary = metrics_mod.training_report(m)
         if train_loss is None:
-            if hasattr(metrics, 'train_loss'):
-                train_loss = metrics.train_loss
-            elif isinstance(metrics, dict):
-                train_loss = metrics.get('train_loss', [])
+            train_loss = m.get('train_loss', [])
         if val_loss is None:
-            if hasattr(metrics, 'val_loss'):
-                val_loss = metrics.val_loss
-            elif isinstance(metrics, dict):
-                val_loss = metrics.get('val_loss', [])
+            val_loss = m.get('val_loss', [])
 
         if auto_plot and graph_filename:
             graph_path = (out_file.parent / graph_filename) if out_file else Path(graph_filename)
-            plot_loss_curves(metrics=metrics, path=graph_path, title=title or "Training and Validation Loss")
+            plotting.plot_loss_curves(metrics=metrics, path=graph_path, title=title or "Training and Validation Loss")
 
     metrics_summary = metrics_summary or {}
     train_loss = train_loss or []
     val_loss = val_loss or []
 
-    if is_dataclass(config):
-        from dataclasses import asdict
-        config = asdict(config)
+    config_dict, param_rows = _format_config_table(config)
 
-    flat_config = flatten_dict(config)
-    param_rows = "\n".join([f"| `{k}` | `{v}` |" for k, v in flat_config.items()])
-
-    exp_name = config.get('experiment_name')
+    exp_name = config_dict.get('experiment_name')
     if title:
         header_title = title
     elif exp_name:
@@ -125,26 +155,23 @@ def experiment_report(
     else:
         header_title = "Experiment Report"
 
-    # Build Trial Overview dynamically so it works across any PyTorch project
+    # Build Trial Overview dynamically
     overview_bullets = []
 
-    # 1. Experiment Name (if present in config)
-    if exp_name and exp_name != config.get('dataset'):
+    # 1. Experiment Name
+    if exp_name and exp_name != config_dict.get('dataset'):
         overview_bullets.append(f"- **Experiment Name:** `{exp_name}`")
 
     # 2. Dataset Configuration
-    dataset_val = config.get('dataset_name') or config.get('dataset')
+    dataset_val = config_dict.get('dataset_name') or config_dict.get('dataset')
     if dataset_val:
         overview_bullets.append(f"- **Dataset Configuration:** `{dataset_val}`")
 
-    # 3. Execution Start, End Date & Time Taken
-    from bokete.utils import format_duration, get_device_name, determine_device
-    import torch
-
+    # 3. Execution Timing
     start_time = metrics_summary.get('start_time')
     end_time = metrics_summary.get('end_time')
     duration_sec = metrics_summary.get('duration_seconds')
-    duration_fmt = metrics_summary.get('duration_formatted') or format_duration(duration_sec)
+    duration_fmt = metrics_summary.get('duration_formatted') or utils.format_duration(duration_sec)
 
     if start_time:
         overview_bullets.append(f"- **Start Date:** `{start_time}`")
@@ -158,7 +185,8 @@ def experiment_report(
     if duration_sec is not None:
         overview_bullets.append(f"- **Time Taken:** `{duration_fmt}` (`{duration_sec:.2f}s`)")
 
-    # 4. Key Hyperparameters (extracted dynamically)
+    # 4. Key Hyperparameters
+    flat_config = utils.flatten_dict(config_dict)
     lr = flat_config.get('lr') or flat_config.get('training.lr')
     batch_size = flat_config.get('batch_size') or flat_config.get('training.batch_size')
     optimizer = flat_config.get('optimizer') or flat_config.get('training.optimizer')
@@ -174,19 +202,12 @@ def experiment_report(
     if hyperparams_list:
         overview_bullets.append(f"- **Key Hyperparameters:** {', '.join(hyperparams_list)}")
 
-    # 5. Device (with GPU model detection)
+    # 5. Device
     device_name = metrics_summary.get('device_name')
     if not device_name and hasattr(metrics, 'device_name'):
         device_name = metrics.device_name
-
-    if device_name:
-        overview_bullets.append(f"- **Execution Device:** `{device_name}`")
-    else:
-        dev_cfg = config.get('device')
-        dev_obj = torch.device(dev_cfg) if dev_cfg else determine_device(verbose=False)
-        dev_gpu = get_device_name(dev_obj)
-        dev_str = f"{dev_obj} ({dev_gpu})" if (dev_gpu and dev_gpu.lower() != dev_obj.type.lower()) else str(dev_obj)
-        overview_bullets.append(f"- **Execution Device:** `{dev_str}`")
+    device_str = _resolve_device_string(config_dict, device_name)
+    overview_bullets.append(f"- **Execution Device:** `{device_str}`")
 
     # 6. Total Epochs & Best Epoch
     if train_loss:
@@ -247,11 +268,7 @@ def experiment_report(
 
 </details>
 """
-    if out_file:
-        out_file.parent.mkdir(parents=True, exist_ok=True)
-        out_file.write_text(report_md, encoding="utf-8")
-        logger.info(f"[BOKeTE] Saved Experiment Report to: {out_file}")
-
+    _write_report(out_file, report_md)
     return report_md
 
 
@@ -266,19 +283,12 @@ def multi_trial_report(
     graph_filename: Optional[str] = "multi_trial_loss.png",
     auto_plot: bool = True,
 ) -> str:
-    """Generates a structured GFM Markdown report summarizing a multi-trial experiment."""
-    import numpy as np
-    import torch
-    from bokete.utils import format_duration, get_device_name, determine_device
-
-    out_file: Optional[Path] = None
-    if save_path:
-        p = Path(save_path)
-        out_file = (p / "summary-report.md") if (p.is_dir() or p.suffix == "" or not p.name.endswith(".md")) else p
+    """Aggregates statistics across multiple experimental trial runs and generates a summary Markdown report."""
+    out_file = utils.resolve_output_path(save_path, "summary-report.md")
 
     if auto_plot and graph_filename and out_file and all_trial_metrics:
         graph_path = out_file.parent / graph_filename
-        plot_multi_trial_loss_curves(
+        plotting.plot_multi_trial_loss_curves(
             all_trial_metrics=all_trial_metrics,
             path=graph_path,
             title="Multi-Trial Training & Validation Loss (Mean ± Std)",
@@ -287,9 +297,7 @@ def multi_trial_report(
     best_val_losses = [min(m['val_loss']) for m in all_trial_metrics if m and 'val_loss' in m and m['val_loss']]
     if not best_val_losses:
         report_md = "# Multi-Trial Experiment Summary\n\nNo trial metrics recorded."
-        if out_file:
-            out_file.parent.mkdir(parents=True, exist_ok=True)
-            out_file.write_text(report_md, encoding="utf-8")
+        _write_report(out_file, report_md)
         return report_md
 
     mean_val = float(np.mean(best_val_losses))
@@ -298,7 +306,7 @@ def multi_trial_report(
     max_val = float(np.max(best_val_losses))
     best_trial_idx = int(np.argmin(best_val_losses)) + 1
 
-    # Extract unique extra_metrics keys across all trials (e.g. Test Accuracy, Test Loss)
+    # Extract unique extra_metrics keys across all trials
     extra_keys: List[str] = []
     for m in all_trial_metrics:
         if isinstance(m, dict) and 'extra_metrics' in m and isinstance(m['extra_metrics'], dict):
@@ -346,29 +354,22 @@ def multi_trial_report(
         trial_table_align += " " + " | ".join([":---:"] * len(extra_keys)) + " |"
 
     trial_table = f"{trial_table_header}\n{trial_table_align}\n" + "\n".join(trial_rows)
-    flat_config = flatten_dict(config)
-    param_rows = "\n".join([f"| `{k}` | `{v}` |" for k, v in flat_config.items()])
-    exp_name = config.get('experiment_name') or config.get('exp_name') or config.get('name')
-    header_title = f"Multi-Trial Experiment Summary: {exp_name}" if (exp_name and exp_name != config.get('dataset')) else "Multi-Trial Experiment Summary"
 
-    exp_bullet = f"- **Experiment Name:** `{exp_name}`\n" if (exp_name and exp_name != config.get('dataset')) else ""
+    config_dict, param_rows = _format_config_table(config)
+    exp_name = config_dict.get('experiment_name') or config_dict.get('exp_name') or config_dict.get('name')
+    header_title = f"Multi-Trial Experiment Summary: {exp_name}" if (exp_name and exp_name != config_dict.get('dataset')) else "Multi-Trial Experiment Summary"
 
-    start_line = f"- **Start Date:** `{start_time}`\n" if start_time else ""
+    exp_bullet = f"- **Experiment Name:** `{exp_name}`\n" if (exp_name and exp_name != config_dict.get('dataset')) else ""
+
+    start_line = f"- **Start Date:** `{start_time}`\n" if start_time else f"- **Execution Date:** `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n"
     end_line = f"- **End Date:** `{end_time}`\n" if end_time else ""
-    dur_line = f"- **Total Time Taken:** `{format_duration(duration_seconds)}` (`{duration_seconds:.2f}s`)\n" if duration_seconds is not None else ""
+    dur_line = f"- **Total Time Taken:** `{utils.format_duration(duration_seconds)}` (`{duration_seconds:.2f}s`)\n" if duration_seconds is not None else ""
 
-    dev_cfg = config.get('device')
-    dev_obj = torch.device(dev_cfg) if dev_cfg else determine_device(verbose=False)
-    dev_gpu = get_device_name(dev_obj)
-    dev_str = f"{dev_obj} ({dev_gpu})" if (dev_gpu and dev_gpu.lower() != dev_obj.type.lower()) else str(dev_obj)
+    dev_str = _resolve_device_string(config_dict)
     dev_line = f"- **Execution Device:** `{dev_str}`\n"
 
     model_bullet, model_section = _format_model_section(model)
     model_line = f"{model_bullet}\n" if model_bullet else ""
-
-    if not start_time:
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        start_line = f"- **Execution Date:** `{now_str}`\n"
 
     loss_graph_section = ""
     if auto_plot and graph_filename:
@@ -389,10 +390,7 @@ def multi_trial_report(
 | :--- | :--- |
 {param_rows}
 """
-    if out_file:
-        out_file.parent.mkdir(parents=True, exist_ok=True)
-        out_file.write_text(report_md, encoding="utf-8")
-        logger.info(f"[BOKeTE] Saved Multi-Trial Report to: {out_file}")
-
+    _write_report(out_file, report_md)
     return report_md
+
 

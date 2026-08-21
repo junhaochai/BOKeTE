@@ -8,22 +8,25 @@ Key Classes & Functions:
   - evaluate     : Computes evaluation loss over a DataLoader without tracking gradients.
 """
 
-import os
-import random
-from pathlib import Path
-from typing import Callable, Optional, Any, List
-
+from datetime import datetime
 import logging
+import os
+from pathlib import Path
+import random
+import time
+from typing import Any, Callable, List, Optional
+
 import numpy as np
 import torch
-import tqdm
 from torch.utils.data import DataLoader
+import tqdm
 
-import time
-from datetime import datetime
+import bokete.metrics as metrics
+import bokete.utils as utils
 
-from bokete.metrics import TrainingMetrics
-from bokete.utils import set_seed, determine_device, log_model_info, get_device_name, format_duration
+
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -153,12 +156,12 @@ class Trainer:
         self.model = model
         self.criterion = criterion
         self.optimizer = optimizer
-        self.device = torch.device(device) if device is not None else determine_device()
+        self.device = torch.device(device) if device is not None else utils.determine_device()
         self.prepare_batch = prepare_batch or _default_prepare_batch
         self.max_grad_norm = max_grad_norm
 
         self.model.to(self.device)
-        log_model_info(self.model, log_layers=log_model_structure)
+        utils.log_model_info(self.model, log_layers=log_model_structure)
 
         # AMP only applies on CUDA; on CPU both autocast and the scaler become no-ops.
         self.amp_active = amp and self.device.type == 'cuda'
@@ -194,14 +197,17 @@ class Trainer:
         running_loss = 0.0
         batches_run = 0
 
-        desc = f" Epoch {epoch_idx}/{total_epochs}" if (epoch_idx and total_epochs) else " Training"
-        batch_pbar = tqdm.tqdm(
+        if epoch_idx and total_epochs:
+            desc = f" {utils.format_epoch_label(epoch_idx, total_epochs)}"
+        else:
+            desc = " Training"
+        batch_pbar = utils.create_progress_bar(
             train_loader,
             desc=desc,
             dynamic_ncols=True,
             leave=False,
             disable=not show_progress,
-            mininterval=1.0,
+            mininterval=0.5,
         )
 
         for batch in batch_pbar:
@@ -255,30 +261,16 @@ class Trainer:
         checkpoint: Optional[Checkpoint] = None,
         progress: bool = True,
         max_train_batches: Optional[int] = None,
-    ) -> TrainingMetrics:
-        """Run the training/validation loop over the specified number of epochs.
-
-        Args:
-            train_loader (DataLoader): DataLoader for the training phase.
-            val_loader (DataLoader): DataLoader for the validation phase.
-            epochs (int): Maximum number of epochs to run.
-            callbacks (list, optional): List of callback objects (e.g. EarlyStopping, Checkpoint, Schedulers).
-            scheduler (optional): Learning rate scheduler; `.step()` is called once per epoch.
-            early_stopping (EarlyStopping, optional): EarlyStopping instance.
-            checkpoint (Checkpoint, optional): Checkpoint instance.
-            progress (bool): If True, shows a progress bar.
-            max_train_batches (int, optional): Cap on training batches per epoch.
-
-        Returns:
-            TrainingMetrics: An object containing lists of training and validation losses.
-        """
-        metrics = TrainingMetrics()
+        log_interval: int = 1,
+    ) -> metrics.TrainingMetrics:
+        """Run the training/validation loop over the specified number of epochs."""
+        m_obj = metrics.TrainingMetrics()
         start_dt = datetime.now()
         start_time_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
-        metrics.start_time = start_time_str
+        m_obj.start_time = start_time_str
 
-        dev_gpu = get_device_name(self.device)
-        metrics.device_name = f"{self.device} ({dev_gpu})" if (dev_gpu and dev_gpu.lower() != self.device.type.lower()) else str(self.device)
+        dev_gpu = utils.get_device_name(self.device)
+        m_obj.device_name = f"{self.device} ({dev_gpu})" if (dev_gpu and dev_gpu.lower() != self.device.type.lower()) else str(self.device)
 
         t0 = time.time()
         self.should_stop = False
@@ -295,57 +287,74 @@ class Trainer:
             all_callbacks.append(scheduler)
 
         try:
-            with tqdm.tqdm(range(epochs), desc=" Overall Progress", dynamic_ncols=True, leave=True, disable=not progress, mininterval=1.0) as pbar:
-                for epoch in pbar:
-                    train_loss = self._train_epoch(
-                        train_loader,
-                        max_batches=max_train_batches,
-                        epoch_idx=epoch + 1,
-                        total_epochs=epochs,
-                        show_progress=progress,
+            for epoch in range(epochs):
+                train_loss = self._train_epoch(
+                    train_loader,
+                    max_batches=max_train_batches,
+                    epoch_idx=epoch + 1,
+                    total_epochs=epochs,
+                    show_progress=progress,
+                )
+                m_obj.train_loss.append(train_loss)
+
+                val_loss = round(self.evaluate(val_loader), 4)
+                m_obj.val_loss.append(val_loss)
+                
+                is_best = (m_obj.best_val_loss is None or val_loss < m_obj.best_val_loss)
+                if is_best:
+                    m_obj.best_val_loss = val_loss
+                    m_obj.best_epoch = epoch + 1
+
+                should_log = (
+                    log_interval <= 1
+                    or (epoch + 1) == 1
+                    or (epoch + 1) == epochs
+                    or (epoch + 1) % log_interval == 0
+                    or is_best
+                )
+
+                if should_log:
+                    best_tag = f" {utils.Colours.BRIGHT_CYAN}★ (Best){utils.Colours.RESET}" if is_best else ""
+                    logger.info(
+                        f"[BOKeTE] {utils.format_epoch_label(epoch + 1, epochs)} | "
+                        f"Train Loss: {utils.Colours.CYAN}{train_loss:.4f}{utils.Colours.RESET} | "
+                        f"Val Loss: {utils.Colours.BRIGHT_CYAN}{val_loss:.4f}{utils.Colours.RESET}{best_tag}"
                     )
-                    metrics.train_loss.append(train_loss)
 
-                    val_loss = round(self.evaluate(val_loader), 4)
-                    metrics.val_loss.append(val_loss)
-                    pbar.set_postfix(train_loss=f"{train_loss:.4f}", val_loss=f"{val_loss:.4f}", refresh=False)
+                # Process callbacks at end of epoch
+                for cb in all_callbacks:
+                    if hasattr(cb, 'on_epoch_end'):
+                        cb.on_epoch_end(self, epoch + 1, val_loss)
+                    elif hasattr(cb, 'step'):
+                        if isinstance(cb, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                            cb.step(val_loss)
+                        else:
+                            cb.step()
 
-                    if metrics.best_val_loss is None or val_loss < metrics.best_val_loss:
-                        metrics.best_val_loss = val_loss
-                        metrics.best_epoch = epoch + 1
-
-                    # Process callbacks at end of epoch
-                    for cb in all_callbacks:
-                        if hasattr(cb, 'on_epoch_end'):
-                            cb.on_epoch_end(self, epoch + 1, val_loss)
-                        elif hasattr(cb, 'step'):
-                            if isinstance(cb, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                                cb.step(val_loss)
-                            else:
-                                cb.step()
-
-                    if self.should_stop:
-                        metrics.stopped_early = True
-                        break
+                if self.should_stop:
+                    m_obj.stopped_early = True
+                    break
 
             t1 = time.time()
             end_dt = datetime.now()
             end_time_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
             elapsed = round(t1 - t0, 2)
-            metrics.end_time = end_time_str
-            metrics.duration_seconds = elapsed
+            m_obj.end_time = end_time_str
+            m_obj.duration_seconds = elapsed
 
+            logger.info("")
             logger.info(
-                f"[BOKeTE] Training complete in {format_duration(elapsed)} | "
+                f"[BOKeTE] Training complete in {utils.format_duration(elapsed)} | "
                 f"Start: {start_time_str} | End: {end_time_str}"
             )
         except KeyboardInterrupt:
             t1 = time.time()
             end_dt = datetime.now()
-            metrics.end_time = end_dt.strftime("%Y-%m-%d %H:%M:%S")
-            metrics.duration_seconds = round(t1 - t0, 2)
-            logger.warning("\n[BOKeTE] Training loop interrupted by user (KeyboardInterrupt). Aborting remaining epochs...")
-            metrics.interrupted = True
+            m_obj.end_time = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+            m_obj.duration_seconds = round(t1 - t0, 2)
+            logger.warning("")
+            logger.warning("[BOKeTE] Training loop interrupted by user (KeyboardInterrupt). Aborting remaining epochs...")
+            m_obj.interrupted = True
             raise
 
-        return metrics
+        return m_obj

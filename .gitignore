@@ -43,3 +43,6 @@ Thumbs.db
 *.log
 results/
 data/
+
+# Dev notes
+khe.txt

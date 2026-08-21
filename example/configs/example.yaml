@@ -3,9 +3,9 @@ seed: 42
 trials: 3
 
 # Optional: Uncomment param_grid to run a multi-config hyperparameter sweep
-# param_grid:
-#   training.lr: [0.001, 0.0005]
-#   model.hidden_dim: [64, 128]
+param_grid:
+  training.lr: [0.001, 0.0005]
+  model.hidden_dim: [64, 128]
 
 data:
   batch_size: 64

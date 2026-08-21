@@ -12,6 +12,11 @@ from bokete.training import (
 )
 from bokete.utils import (
     BOKeTEFormatter,
+    Colours,
+    TqdmLoggingHandler,
+
+
+
     close_file_loggers,
     create_run_directory,
     determine_device,
@@ -22,7 +27,9 @@ from bokete.utils import (
     load_config,
     load_config_as,
     parse_cli_config,
+    resolve_config_path,
     log_dataset_info,
+    log_experiment_start,
     log_model_info,
     log_trial_start,
     set_nested_key,
@@ -39,6 +46,8 @@ __version__ = "0.1.1"
 
 __all__ = [
     "BOKeTEFormatter",
+    "Colours",
+    "TqdmLoggingHandler",
     "Checkpoint",
     "EarlyStopping",
     "TrainingMetrics",
@@ -55,7 +64,9 @@ __all__ = [
     "load_config",
     "load_config_as",
     "parse_cli_config",
+    "resolve_config_path",
     "log_dataset_info",
+    "log_experiment_start",
     "log_model_info",
     "log_trial_start",
     "multi_trial_report",
