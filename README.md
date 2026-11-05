@@ -3,7 +3,7 @@
 # BOKeTE
 
 [![PyPI Version](https://img.shields.io/pypi/v/BOKeTE.svg)](https://pypi.org/project/BOKeTE/)
-[![Licence: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Licence: All rights reserved](https://img.shields.io/badge/Licence-All_rights_reserved-blue.svg)](LICENSE)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![PyTorch: 2.0+](https://img.shields.io/badge/PyTorch-2.0%2B-ee4c2c.svg)](https://pytorch.org/)
 [![Build System: Hatchling](https://img.shields.io/badge/Build-Hatchling-green.svg)](https://hatch.pypa.io/)
@@ -20,7 +20,7 @@ A minimal PyTorch training and experimentation helper library for my personal us
 - **Experimentation & Reporting**: Metric tracking, loss curve rendering (Matplotlib + Chart.js HTML), grid search parameter sweeps, and GFM Markdown report compilation (single-trial + multi-trial summaries).
 
 > [!NOTE]
-> **Personal Tooling & Disclaimer**: `bokete` is an opinionated, personal PyTorch helper library created to streamline my own research workflows. While open-sourced under the MIT License, it is provided "as is" without warranty, guarantee of support, or promises of backward compatibility. If you choose to use it, you do so entirely at your own risk.
+> **Personal Tooling & Permissions**: `bokete` is a personal PyTorch helper library made publicly visible for portfolio review and inspection. From `0.2.0` onwards, including `0.2.0.dev0`, reuse requires prior written permission from [Jun Hao Chai](https://github.com/junhaochai), except where applicable law, hosting-platform terms or existing licence grants permit otherwise. Earlier MIT-licensed versions and material retain their original permissions; their notices remain in the earlier releases and Git history. See [LICENSE](LICENSE) for current terms. The software is provided "as is", without warranty, guaranteed support or promises of backward compatibility.
 
 ## Table of Contents
 
@@ -32,6 +32,7 @@ A minimal PyTorch training and experimentation helper library for my personal us
   - [4.2 Multi-Trial Execution & Sweeps (`bokete.experiments`)](#42-multi-trial-execution--sweeps-boketeexperiments)
   - [4.3 Configuration & Directory Utilities (`bokete.utils`)](#43-configuration--directory-utilities-boketeutils)
 - [5. Project Architecture](#5-project-architecture)
+- [6. Roadmap](#6-roadmap)
 
 ---
 
@@ -325,5 +326,22 @@ bokete/
         ├── training.py    # Core Trainer, EarlyStopping, Checkpoint, auto-benchmarking
         └── utils.py       # Configuration I/O, device checks, seeds & console formatters
 ```
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+---
+
+## 6. Roadmap
+
+- [ ] Standardise metric names and monitoring direction so checkpoint
+      selection, early stopping and reports use the same validation metric.
+- [ ] Clarify report labels, such as validation accuracy at the selected
+      epoch versus validation accuracy at the final epoch.
+- [ ] Support full-state checkpoint resume, including model, optimiser,
+      scheduler and AMP scaler state, best score, early-stopping counter,
+      completed epoch and random-number generator state. Treat `epochs`
+      as the total target: resuming after 10 completed epochs with
+      `epochs=20` runs 10 more.
+- [ ] Log and report collected metrics without another validation pass.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
