@@ -31,6 +31,7 @@ A minimal PyTorch training and experimentation helper library for my personal us
   - [4.1 Loss Curve Plotting (`bokete.plotting`)](#41-loss-curve-plotting-boketeplotting)
   - [4.2 Multi-Trial Execution & Sweeps (`bokete.experiments`)](#42-multi-trial-execution--sweeps-boketeexperiments)
   - [4.3 Configuration & Directory Utilities (`bokete.utils`)](#43-configuration--directory-utilities-boketeutils)
+  - [4.4 Validation Metric Selection](#44-validation-metric-selection)
 - [5. Project Architecture](#5-project-architecture)
 - [6. Roadmap](#6-roadmap)
 
@@ -127,6 +128,7 @@ training:
   max_grad_norm: null            # L2 gradient clipping threshold
   early_stopping_patience: 10   # Stop if val loss stalls
   save_checkpoints: true         # Save best.pt and last.pt weights
+  monitor: "val_accuracy"        # Higher wins; val_loss selects the lowest loss
 ```
 
 ### 3.2 PyTorch Pipeline Integration (`train.py`)
@@ -169,7 +171,8 @@ history = trainer.fit(
     train_loader=train_loader, 
     val_loader=val_loader, 
     epochs=t_cfg.get("epochs", 20), 
-    callbacks=callbacks
+    callbacks=callbacks,
+    monitor=t_cfg.get("monitor", "val_loss"),
 )
 
 # 4. Generate & Save Markdown Report (Auto-embeds YAML table & loss curves!)
@@ -306,6 +309,35 @@ bokete.set_nested_key(config, "training.lr", 0.0005)
 run_dir = bokete.create_run_directory(base_dir="results", experiment_name=config.get("experiment_name"))
 ```
 
+### 4.4 Validation Metric Selection
+
+Set `training.monitor` when using `create_trial_runner`, or pass `monitor`
+directly to `Trainer.fit`:
+
+```yaml
+training:
+  monitor: val_accuracy
+```
+
+- `val_accuracy` selects the highest validation top-1 accuracy. It requires
+  multiclass outputs shaped `[batch, classes]` and integer class-index targets
+  shaped `[batch]`. Accuracy is a fraction from 0 to 1, calculated across all
+  samples during the existing validation pass, and is collected when selected.
+  Targets matching the loss function's `ignore_index` are excluded. Batches
+  with no valid targets are skipped; validation requires at least one valid target.
+- `val_loss` selects the lowest validation loss and remains the default for
+  configurations that omit `monitor`. It also supports regression models.
+- The direction is inferred; no `mode` setting is needed. Ties retain the
+  earlier epoch. Checkpoints, early stopping and sweep rankings use the selected
+  metric. Early stopping's `min_delta` controls how much improvement resets
+  patience; checkpoints save every strict improvement.
+- Reports identify the selected epoch and its validation score. Minimum loss
+  can occur at a different epoch when accuracy is monitored. Test callbacks
+  remain separate and do not select checkpoints.
+- A sweep must use the same monitor across configurations so its scores can be
+  compared. A `ReduceLROnPlateau` scheduler must use `mode="max"` for accuracy
+  or `mode="min"` for loss; it receives the monitored score.
+
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 ---
@@ -333,15 +365,15 @@ bokete/
 
 ## 6. Roadmap
 
-- [ ] Standardise metric names and monitoring direction so checkpoint
+- [x] Standardise metric names and monitoring direction so checkpoint
       selection, early stopping and reports use the same validation metric.
-- [ ] Clarify report labels, such as validation accuracy at the selected
+- [x] Clarify report labels, such as validation accuracy at the selected
       epoch versus validation accuracy at the final epoch.
 - [ ] Support full-state checkpoint resume, including model, optimiser,
       scheduler and AMP scaler state, best score, early-stopping counter,
       completed epoch and random-number generator state. Treat `epochs`
       as the total target: resuming after 10 completed epochs with
       `epochs=20` runs 10 more.
-- [ ] Log and report collected metrics without another validation pass.
+- [x] Log and report collected metrics without another validation pass.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>

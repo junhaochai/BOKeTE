@@ -3,7 +3,7 @@ Core training machinery for bokete.
 
 Key Classes & Functions:
   - Trainer      : Main training loop engine handling fit(), epochs, AMP, and callback hooks.
-  - EarlyStopping: Callback for halting training when validation loss stops improving.
+  - EarlyStopping: Callback for halting training when the monitored validation metric stalls.
   - Checkpoint   : Callback for saving best.pt and last.pt model state dictionaries.
   - evaluate     : Computes evaluation loss over a DataLoader without tracking gradients.
 """
@@ -33,22 +33,26 @@ logger = logging.getLogger(__name__)
 
 class EarlyStopping:
     """
-    Signals that training should stop once validation loss has not improved
-    by at least min_delta for `patience` consecutive epochs.
+    Signals that training should stop once the monitored validation metric has not improved
+    by more than min_delta for `patience` consecutive epochs.
     """
 
-    def __init__(self, patience=10, min_delta=0.0):
+    def __init__(self, patience=10, min_delta=0.0, *, monitor="val_loss"):
+        if min_delta < 0:
+            raise ValueError("min_delta must be non-negative.")
         self.patience = patience
         self.min_delta = min_delta
-        self.best_loss = float('inf')
+        self.monitor = monitor
+        self.mode = metrics.monitor_mode(monitor)
+        self.best_score = None
         self.bad_epochs = 0
 
     def step(self, val_loss):
-        """Record this epoch's validation loss. Returns True when patience is exhausted."""
+        """Record the monitored score. Returns True when patience is exhausted."""
         if self.patience is None or self.patience <= 0:
             return False
-        if val_loss < self.best_loss - self.min_delta:
-            self.best_loss = val_loss
+        if metrics.is_improvement(val_loss, self.best_score, self.mode, self.min_delta):
+            self.best_score = val_loss
             self.bad_epochs = 0
         else:
             self.bad_epochs += 1
@@ -56,33 +60,48 @@ class EarlyStopping:
 
     def on_epoch_end(self, trainer: Any, epoch: int, val_loss: float) -> None:
         """Callback hook for Trainer fit loop."""
-        if self.step(val_loss):
+        score = val_loss if self.monitor == "val_loss" else trainer.current_metrics[self.monitor]
+        if self.step(score):
             trainer.should_stop = True
 
 
 class Checkpoint:
     """
     Saves model weights during training: 'last.pt' every epoch and 'best.pt'
-    whenever validation loss improves. Files contain a dict with the epoch,
-    validation loss and model state_dict.
+    whenever the monitored validation metric improves. Files contain the epoch,
+    validation loss, selection metadata and model state_dict.
     """
 
-    def __init__(self, directory, save_best=True, save_last=True, enabled=True):
+    def __init__(self, directory, save_best=True, save_last=True, enabled=True, *, monitor="val_loss"):
         self.directory = Path(directory)
         self.save_best = save_best
         self.save_last = save_last
         self.enabled = enabled
-        self.best_loss = float('inf')
+        self.monitor = monitor
+        self.mode = metrics.monitor_mode(monitor)
+        self.best_score = None
+        self.best_saved = False
 
-    def update(self, model, epoch, val_loss, optimizer=None):
+    def update(self, model, epoch, val_loss, optimizer=None, *, score=None):
         if not self.enabled or not (self.save_best or self.save_last):
             return
+        if score is None:
+            if self.monitor != "val_loss":
+                raise ValueError("An explicit score is required when monitoring validation accuracy.")
+            score = val_loss
+        improved = metrics.is_improvement(score, self.best_score, self.mode)
+        if improved:
+            self.best_score = score
         self.directory.mkdir(parents=True, exist_ok=True)
         # Extract inner model from multi-GPU wrapper (DataParallel/DDP), or fallback to raw model on single-GPU/CPU
         raw_model = getattr(model, 'module', model)
         state = {
             'epoch': epoch,
             'val_loss': val_loss,
+            'monitor': self.monitor,
+            'mode': self.mode,
+            'score': score,
+            'best_score': self.best_score,
             'model_state_dict': raw_model.state_dict(),
         }
         if optimizer is not None:
@@ -90,13 +109,14 @@ class Checkpoint:
 
         if self.save_last:
             torch.save(state, self.directory / 'last.pt')
-        if self.save_best and val_loss < self.best_loss:
-            self.best_loss = val_loss
+        if self.save_best and improved:
             torch.save(state, self.directory / 'best.pt')
+            self.best_saved = True
 
     def on_epoch_end(self, trainer: Any, epoch: int, val_loss: float) -> None:
         """Callback hook for Trainer fit loop."""
-        self.update(trainer.model, epoch, val_loss, optimizer=trainer.optimizer)
+        score = val_loss if self.monitor == "val_loss" else trainer.current_metrics[self.monitor]
+        self.update(trainer.model, epoch, val_loss, optimizer=trainer.optimizer, score=score)
 
 
 def _default_prepare_batch(batch, device):
@@ -105,8 +125,15 @@ def _default_prepare_batch(batch, device):
     return inputs.to(device, non_blocking=True), targets.to(device, non_blocking=True)
 
 
-def evaluate(model, loader, criterion, device=None, prepare_batch=None, amp_active=False):
-    """Compute the mean loss of `model` over `loader` without tracking gradients."""
+def evaluate(model, loader, criterion, device=None, prepare_batch=None, amp_active=False, *, collect_accuracy=False):
+    """Compute loss, and optionally top-1 accuracy, in one validation pass.
+
+    Returns a float by default, or a val_loss/val_accuracy dict when
+    collect_accuracy=True. Accuracy requires multiclass scores and integer
+    class-index targets; it is weighted by valid samples, including a short last
+    batch. Targets matching criterion.ignore_index are excluded. Batches with
+    no valid targets are skipped; validation with no valid targets is rejected.
+    """
     device = torch.device(device) if device is not None else utils.determine_device()
 
     if prepare_batch is None:
@@ -115,16 +142,35 @@ def evaluate(model, loader, criterion, device=None, prepare_batch=None, amp_acti
     model.eval()
     running_loss = 0.0
     batches = 0
+    correct = 0
+    total = 0
 
     with torch.inference_mode():
         for batch in loader:
             inputs, targets = prepare_batch(batch, device)
+            if collect_accuracy:
+                ignore_index = getattr(criterion, "ignore_index", None)
+                valid = targets != ignore_index if ignore_index is not None else torch.ones_like(targets, dtype=torch.bool)
+                if not valid.any():
+                    continue
             with torch.autocast(device_type=device.type, enabled=amp_active):
                 outputs = model(inputs)
                 running_loss += criterion(outputs, targets).item()
+            if collect_accuracy:
+                if (outputs.ndim != 2 or outputs.shape[1] < 2 or targets.ndim != 1
+                        or outputs.shape[0] != targets.shape[0]
+                        or targets.dtype not in (torch.int8, torch.int16, torch.int32, torch.int64, torch.uint8)):
+                    raise ValueError("val_accuracy requires [batch, classes] outputs and [batch] class-index targets.")
+                correct += ((outputs.argmax(dim=1) == targets) & valid).sum().item()
+                total += valid.sum().item()
             batches += 1
 
-    return running_loss / max(batches, 1)
+    loss = running_loss / max(batches, 1)
+    if collect_accuracy:
+        if total == 0:
+            raise ValueError("Cannot monitor validation accuracy on an empty loader or with no valid targets.")
+        return {"val_loss": loss, "val_accuracy": correct / total}
+    return loss
 
 
 class Trainer:
@@ -172,8 +218,10 @@ class Trainer:
         self._variable_shapes_detected = False
 
         self.should_stop = False
+        self.monitor = "val_loss"
+        self.current_metrics = {}
 
-    def evaluate(self, loader: DataLoader) -> float:
+    def evaluate(self, loader: DataLoader, *, collect_accuracy: bool = False):
         """Compute the mean loss of `model` over `loader` using Trainer configuration."""
         return evaluate(
             self.model,
@@ -182,6 +230,7 @@ class Trainer:
             device=self.device,
             prepare_batch=self.prepare_batch,
             amp_active=self.amp_active,
+            collect_accuracy=collect_accuracy,
         )
 
     def _train_epoch(
@@ -262,9 +311,19 @@ class Trainer:
         progress: bool = True,
         max_train_batches: Optional[int] = None,
         log_interval: int = 1,
+        monitor: str = "val_loss",
     ) -> metrics.TrainingMetrics:
-        """Run the training/validation loop over the specified number of epochs."""
-        m_obj = metrics.TrainingMetrics()
+        """Train while selecting epochs by val_loss (min) or val_accuracy (max).
+
+        monitor is authoritative for built-in checkpoint and early-stopping
+        callbacks. Custom on_epoch_end callbacks still receive validation loss;
+        all collected values are available in trainer.current_metrics. A
+        ReduceLROnPlateau scheduler receives the monitored score and must have
+        the matching mode. Accuracy is collected only when it is monitored.
+        """
+        self.mode = metrics.monitor_mode(monitor)
+        self.monitor = monitor
+        m_obj = metrics.TrainingMetrics(monitor=monitor)
         start_dt = datetime.now()
         start_time_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
         m_obj.start_time = start_time_str
@@ -285,6 +344,17 @@ class Trainer:
             all_callbacks.append(checkpoint)
         if scheduler and scheduler not in all_callbacks:
             all_callbacks.append(scheduler)
+        for cb in all_callbacks:
+            if isinstance(cb, (EarlyStopping, Checkpoint)):
+                cb.monitor = monitor
+                cb.mode = self.mode
+                cb.best_score = None
+                if isinstance(cb, EarlyStopping):
+                    cb.bad_epochs = 0
+                else:
+                    cb.best_saved = False
+            if isinstance(cb, torch.optim.lr_scheduler.ReduceLROnPlateau) and cb.mode != self.mode:
+                raise ValueError("ReduceLROnPlateau mode must match the monitored metric direction.")
 
         try:
             for epoch in range(epochs):
@@ -297,12 +367,20 @@ class Trainer:
                 )
                 m_obj.train_loss.append(train_loss)
 
-                val_loss = round(self.evaluate(val_loader), 4)
+                if monitor == "val_accuracy":
+                    self.current_metrics = self.evaluate(val_loader, collect_accuracy=True)
+                    m_obj.val_accuracy.append(self.current_metrics["val_accuracy"])
+                else:
+                    self.current_metrics = {"val_loss": self.evaluate(val_loader)}
+                val_loss = self.current_metrics["val_loss"]
                 m_obj.val_loss.append(val_loss)
-                
-                is_best = (m_obj.best_val_loss is None or val_loss < m_obj.best_val_loss)
-                if is_best:
+
+                score = self.current_metrics[monitor]
+                is_best = metrics.is_improvement(score, m_obj.best_score, self.mode)
+                if m_obj.best_val_loss is None or val_loss < m_obj.best_val_loss:
                     m_obj.best_val_loss = val_loss
+                if is_best:
+                    m_obj.best_score = score
                     m_obj.best_epoch = epoch + 1
 
                 should_log = (
@@ -314,11 +392,15 @@ class Trainer:
                 )
 
                 if should_log:
+                    accuracy_log = (
+                        f" | Validation Accuracy: {self.current_metrics['val_accuracy']:.4f}"
+                        if "val_accuracy" in self.current_metrics else ""
+                    )
                     best_tag = f" {utils.Colours.BRIGHT_CYAN}★ (Best){utils.Colours.RESET}" if is_best else ""
                     logger.info(
                         f"[BOKeTE] {utils.format_epoch_label(epoch + 1, epochs)} | "
                         f"Train Loss: {utils.Colours.CYAN}{train_loss:.4f}{utils.Colours.RESET} | "
-                        f"Val Loss: {utils.Colours.BRIGHT_CYAN}{val_loss:.4f}{utils.Colours.RESET}{best_tag}"
+                        f"Val Loss: {utils.Colours.BRIGHT_CYAN}{val_loss:.4f}{utils.Colours.RESET}{accuracy_log}{best_tag}"
                     )
 
                 # Process callbacks at end of epoch
@@ -327,7 +409,7 @@ class Trainer:
                         cb.on_epoch_end(self, epoch + 1, val_loss)
                     elif hasattr(cb, 'step'):
                         if isinstance(cb, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                            cb.step(val_loss)
+                            cb.step(score)
                         else:
                             cb.step()
 

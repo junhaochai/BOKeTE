@@ -22,3 +22,4 @@ training:
   loss: "CrossEntropyLoss"
   patience: 3
   save_checkpoints: true
+  monitor: "val_accuracy" # Higher wins; use val_loss for lower-is-better selection

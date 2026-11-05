@@ -79,8 +79,8 @@ def plot_loss_curves(
     # Draw a line for the best epoch if provided
     if best_epoch is not None and 1 <= best_epoch <= num_epochs:
         best_val = val_loss[best_epoch - 1]
-        ax.axvline(x=best_epoch, color='#7570b3', linestyle='--', alpha=0.8, label=f'Best Epoch ({best_epoch})')
-        ax.plot(best_epoch, best_val, 'ro', markersize=8, label=f'Best Val Loss ({best_val:.4f})')
+        ax.axvline(x=best_epoch, color='#7570b3', linestyle='--', alpha=0.8, label=f'Selected Epoch ({best_epoch})')
+        ax.plot(best_epoch, best_val, 'ro', markersize=8, label=f'Val Loss at Selected Epoch ({best_val:.4f})')
 
     _finalise_plot(fig, ax, save_path, title, log_label="loss curves")
 

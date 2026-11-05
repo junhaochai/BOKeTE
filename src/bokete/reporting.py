@@ -121,6 +121,8 @@ def trial_report(
 ) -> str:
     """Generates a structured GFM Markdown report string for a single trial run."""
     out_file = utils.resolve_output_path(save_path, "report.md")
+    config_dict, param_rows = _format_config_table(config)
+    configured_monitor = utils.get_nested_key(config_dict, "training.monitor")
 
     # Detect if a TrainingMetrics or metrics dict was passed as 2nd positional argument
     if hasattr(metrics_summary, 'train_loss') or (
@@ -131,8 +133,13 @@ def trial_report(
 
     if metrics is not None:
         m = metrics if isinstance(metrics, dict) else metrics.as_dict()
+        selection = metrics_mod.selection_summary(m, configured_monitor)
+        m = {**m, **selection}
         if metrics_summary is None:
             metrics_summary = metrics_mod.training_report(m)
+        else:
+            metrics_mod.selection_summary(metrics_summary, selection['monitor'])
+            metrics_summary = {**metrics_summary, **selection}
         if train_loss is None:
             train_loss = m.get('train_loss', [])
         if val_loss is None:
@@ -140,13 +147,15 @@ def trial_report(
 
         if auto_plot and graph_filename:
             graph_path = (out_file.parent / graph_filename) if out_file else Path(graph_filename)
-            plotting.plot_loss_curves(metrics=metrics, path=graph_path, title=title or "Training and Validation Loss")
+            plotting.plot_loss_curves(metrics=m, best_epoch=selection['best_epoch'], path=graph_path,
+                                      title=title or "Training and Validation Loss")
 
-    metrics_summary = metrics_summary or {}
+    metrics_summary = dict(metrics_summary or {})
+    monitor = configured_monitor or metrics_summary.get('monitor', 'val_loss')
+    metrics_mod.selection_summary(metrics_summary, monitor)
+    metrics_summary['monitor'] = monitor
     train_loss = train_loss or []
     val_loss = val_loss or []
-
-    config_dict, param_rows = _format_config_table(config)
 
     exp_name = config_dict.get('experiment_name')
     if title:
@@ -215,11 +224,16 @@ def trial_report(
         overview_bullets.append(f"- **Total Epochs Run:** `{len(train_loss)}`")
 
     best_epoch = metrics_summary.get('best_epoch')
-    best_val_loss = metrics_summary.get('best_val_loss')
-    if best_epoch and best_val_loss:
-        overview_bullets.append(f"- **Best Epoch:** `{best_epoch}` (Validation Loss: `{best_val_loss}`)")
+    monitor = metrics_summary.get('monitor', 'val_loss')
+    mode = metrics_mod.monitor_mode(monitor)
+    overview_bullets.append(f"- **Selection Metric:** `{monitor}` ({'minimise' if mode == 'min' else 'maximise'})")
+    best_score = metrics_summary.get('best_score')
+    if best_score is None and monitor == 'val_loss':
+        best_score = metrics_summary.get('best_val_loss')
+    if best_epoch and best_score is not None:
+        overview_bullets.append(f"- **Selected Epoch:** `{best_epoch}` ({utils.format_metric_name(monitor)}: `{best_score}`)")
     elif best_epoch:
-        overview_bullets.append(f"- **Best Epoch:** `{best_epoch}`")
+        overview_bullets.append(f"- **Selected Epoch:** `{best_epoch}`")
 
     # 7. Model Architecture Metadata
     model_bullet, model_section = _format_model_section(model)
@@ -232,10 +246,18 @@ def trial_report(
     extra_rows = ""
     if extra_metrics:
         extra_rows = "\n" + "\n".join([f"| {utils.format_metric_name(k)} | `{v}` |" for k, v in extra_metrics.items()])
+    for key, label in (("selected_val_accuracy", "Selected Epoch Validation Accuracy"),
+                       ("final_val_accuracy", "Final Validation Accuracy"),
+                       ("selected_val_loss", "Selected Epoch Validation Loss")):
+        if metrics_summary.get(key) is not None:
+            extra_rows += f"\n| {label} | `{metrics_summary[key]}` |"
 
     # Build Collapsible Per-Epoch Details Table
+    accuracy = m.get('val_accuracy', []) if metrics is not None else []
+    accuracy_header = " Validation Accuracy |" if accuracy else ""
+    accuracy_align = " :---: |" if accuracy else ""
     epoch_rows = "\n".join([
-        f"| {epoch + 1} | {t:.4f} | {v:.4f} |"
+        f"| {epoch + 1} | {t:.4f} | {v:.4f} |" + (f" {accuracy[epoch]:.4f} |" if accuracy else "")
         for epoch, (t, v) in enumerate(zip(train_loss, val_loss))
     ])
 
@@ -263,8 +285,8 @@ def trial_report(
 <details>
 <summary><b>View Full Epoch Breakdown ({len(train_loss)} Epochs)</b></summary>
 
-| Epoch | Train Loss | Validation Loss |
-| :---: | :---: | :---: |
+| Epoch | Train Loss | Validation Loss |{accuracy_header}
+| :---: | :---: | :---: |{accuracy_align}
 {epoch_rows}
 
 </details>
@@ -286,6 +308,12 @@ def config_report(
 ) -> str:
     """Aggregates statistics across multiple experimental trial runs for a configuration (config-report.md)."""
     out_file = utils.resolve_output_path(save_path, "config-report.md")
+    config_dict, param_rows = _format_config_table(config)
+    default_monitor = all_trial_metrics[0].get('monitor', 'val_loss') if all_trial_metrics else 'val_loss'
+    monitor = utils.get_nested_key(config_dict, "training.monitor", default=default_monitor)
+    mode = metrics_mod.monitor_mode(monitor)
+    metric_label = utils.format_metric_name(monitor)
+    selections = [metrics_mod.selection_summary(m, monitor) for m in all_trial_metrics]
 
     if auto_plot and graph_filename and out_file and all_trial_metrics:
         graph_path = out_file.parent / graph_filename
@@ -295,7 +323,8 @@ def config_report(
             title="Multi-Trial Training & Validation Loss (Mean ± Std)",
         )
 
-    best_val_losses = [min(m['val_loss']) for m in all_trial_metrics if m and 'val_loss' in m and m['val_loss']]
+    scored_trials = [(idx, s['best_score']) for idx, s in enumerate(selections, 1) if s['best_score'] is not None]
+    best_val_losses = [score for _, score in scored_trials]
     if not best_val_losses:
         report_md = "# Configuration Report\n\nNo trial metrics recorded."
         _write_report(out_file, report_md)
@@ -305,7 +334,9 @@ def config_report(
     std_val = float(np.std(best_val_losses))
     min_val = float(np.min(best_val_losses))
     max_val = float(np.max(best_val_losses))
-    best_trial_idx = int(np.argmin(best_val_losses)) + 1
+    best_index = int(np.argmin(best_val_losses) if mode == 'min' else np.argmax(best_val_losses))
+    best_trial_idx = scored_trials[best_index][0]
+    best_value = best_val_losses[best_index]
 
     # Extract unique extra_metrics keys across all trials
     extra_keys: List[str] = []
@@ -339,8 +370,9 @@ def config_report(
     for idx, m in enumerate(all_trial_metrics, 1):
         v_loss = m.get('val_loss', []) if isinstance(m, dict) else []
         t_loss = m.get('train_loss', []) if isinstance(m, dict) else []
-        b_val = min(v_loss) if v_loss else 'N/A'
-        b_ep = int(np.argmin(v_loss)) + 1 if v_loss else 'N/A'
+        b_val = selections[idx - 1]['best_score']
+        b_val = b_val if b_val is not None else 'N/A'
+        b_ep = selections[idx - 1]['best_epoch'] or 'N/A'
         f_tr = t_loss[-1] if t_loss else 'N/A'
         f_vl = v_loss[-1] if v_loss else 'N/A'
 
@@ -351,7 +383,7 @@ def config_report(
                 row_cells.append(f"`{em.get(ek, 'N/A')}`")
         trial_rows.append(" | ".join(row_cells) + " |")
 
-    trial_table_header = "| Trial | Best Epoch | Best Val Loss | Final Train Loss | Final Validation Loss |"
+    trial_table_header = f"| Trial | Selected Epoch | Selected {metric_label} | Final Train Loss | Final Validation Loss |"
     trial_table_align = "| :---: | :---: | :---: | :---: | :---: |"
     if extra_keys:
         formatted_extra_headers = [utils.format_metric_name(ek) for ek in extra_keys]
@@ -360,7 +392,6 @@ def config_report(
 
     trial_table = f"{trial_table_header}\n{trial_table_align}\n" + "\n".join(trial_rows)
 
-    config_dict, param_rows = _format_config_table(config)
     exp_name = config_dict.get('experiment_name') or config_dict.get('exp_name') or config_dict.get('name')
     header_title = f"Configuration Report: {exp_name}" if (exp_name and exp_name != config_dict.get('dataset')) else "Configuration Report"
 
@@ -383,9 +414,11 @@ def config_report(
     report_md = f"""# {header_title}
 
 ## Aggregate Performance ({len(all_trial_metrics)} Trials)
-{exp_bullet}{start_line}{end_line}{dur_line}{dev_line}{model_line}- **Mean Best Validation Loss:** `{mean_val:.4f} ± {std_val:.4f}`
-- **Lowest Validation Loss (Best Trial):** `{min_val:.4f}` (Trial {best_trial_idx})
-- **Highest Validation Loss:** `{max_val:.4f}`
+{exp_bullet}{start_line}{end_line}{dur_line}{dev_line}{model_line}- **Selection Metric:** `{monitor}` ({'minimise' if mode == 'min' else 'maximise'})
+- **Mean Best {metric_label}:** `{mean_val:.4f} ± {std_val:.4f}`
+- **Best Trial {metric_label}:** `{best_value:.4f}` (Trial {best_trial_idx})
+- **Lowest Selected {metric_label}:** `{min_val:.4f}`
+- **Highest Selected {metric_label}:** `{max_val:.4f}`
 {extra_summary_str}{model_section}
 ## Per-Trial Performance Breakdown
 {trial_table}
@@ -411,6 +444,18 @@ def experiment_report(
     out_file = utils.resolve_output_path(save_path, "experiment-report.md")
 
     config_dict, param_rows = _format_config_table(config)
+    base_monitor = utils.get_nested_key(config_dict, "training.monitor")
+    run_monitors = []
+    for result in sweep_results:
+        effective_monitor = result.get('parameters', {}).get('training.monitor', base_monitor)
+        for history in result.get('metrics', []):
+            selection = metrics_mod.selection_summary(history, effective_monitor)
+            run_monitors.append(selection['monitor'])
+    if len(set(run_monitors)) > 1:
+        raise ValueError("Cannot compare runs with different monitoring settings.")
+    monitor = run_monitors[0] if run_monitors else base_monitor or 'val_loss'
+    mode = metrics_mod.monitor_mode(monitor)
+    metric_label = utils.format_metric_name(monitor)
     exp_name = config_dict.get('experiment_name') or config_dict.get('exp_name') or config_dict.get('name')
     header_title = f"Experiment Report: {exp_name}" if exp_name else "Experiment Report"
 
@@ -430,7 +475,8 @@ def experiment_report(
         metrics_list = res.get("metrics", [])
         run_dir = res.get("run_dir")
 
-        best_val_losses = [min(m['val_loss']) for m in metrics_list if m and 'val_loss' in m and m['val_loss']]
+        selections = [metrics_mod.selection_summary(m, monitor) for m in metrics_list]
+        best_val_losses = [s['best_score'] for s in selections if s['best_score'] is not None]
         mean_best_val = float(np.mean(best_val_losses)) if best_val_losses else None
         std_best_val = float(np.std(best_val_losses)) if best_val_losses else 0.0
 
@@ -470,10 +516,11 @@ def experiment_report(
 
     sorted_combos = sorted(
         processed_combos,
-        key=lambda c: c["mean_best_val"] if c["mean_best_val"] is not None else float("inf")
+        key=lambda c: (c["mean_best_val"] if mode == 'min' else -c["mean_best_val"])
+        if c["mean_best_val"] is not None else float("inf")
     )
 
-    table_headers = ["Rank", "Configuration", "Mean Best Val Loss"]
+    table_headers = ["Rank", "Configuration", f"Mean Best {metric_label}"]
     table_aligns = [":---:", ":---", ":---:"]
 
     for ek in all_extra_keys:
@@ -508,7 +555,7 @@ def experiment_report(
     top_performer = sorted_combos[0] if sorted_combos else None
     if top_performer and top_performer["mean_best_val"] is not None:
         best_details = [f"- **Configuration:** {top_performer['param_desc']}"]
-        best_details.append(f"- **Best Validation Loss:** `{top_performer['mean_best_val']:.4f} ± {top_performer['std_best_val']:.4f}`")
+        best_details.append(f"- **Best {metric_label}:** `{top_performer['mean_best_val']:.4f} ± {top_performer['std_best_val']:.4f}`")
         for ek, (mv, sv) in top_performer["extra_stats"].items():
             fmt_ek = utils.format_metric_name(ek)
             fmt_ek_lower = fmt_ek.lower()
@@ -536,6 +583,7 @@ def experiment_report(
 ## Study Overview
 {exp_bullet}{start_line}{end_line}{dur_line}{dev_line}- **Configurations Tested:** `{total_configs}`
 - **Total Executions:** `{sum(c['num_trials'] for c in processed_combos)}` trials
+- **Selection Metric:** `{monitor}` ({'minimise' if mode == 'min' else 'maximise'})
 
 ## Optimal Configuration
 {winner_box}

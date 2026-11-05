@@ -17,6 +17,50 @@ from bokete.metrics import TrainingMetrics
 
 class TestExperiments(unittest.TestCase):
 
+    def test_sweep_monitor_override_completes_final_report(self):
+        config = {"experiment_name": "monitor_override", "training": {"monitor": "val_loss"},
+                  "param_grid": {"training.monitor": ["val_accuracy"]}}
+
+        def runner(trial_num, run_config, **kwargs):
+            return {"train_loss": [0.3, 0.2], "val_loss": [0.1, 0.5],
+                    "val_accuracy": [0.6, 0.9], "monitor": run_config['training']['monitor']}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = run_experiments(config, run_fn=runner, output_dir=tmpdir)
+            report = (Path(tmpdir) / "experiment-report.md").read_text(encoding="utf-8")
+        self.assertEqual(len(result), 1)
+        self.assertIn("**Selection Metric:** `val_accuracy` (maximise)", report)
+
+    def test_trial_runner_passes_accuracy_monitor(self):
+        def loaders(config):
+            loader = DataLoader(TensorDataset(torch.randn(6, 2), torch.tensor([0, 1, 0, 1, 0, 1])), batch_size=4)
+            return loader, loader
+
+        runner = create_trial_runner(lambda config: nn.Linear(2, 2), loaders)
+        config = {"experiment_name": "accuracy_runner", "training": {"epochs": 1, "monitor": "val_accuracy"}}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = runner(1, config, output_dir=tmpdir)
+            checkpoint = torch.load(Path(tmpdir) / "trial_1" / "checkpoints" / "best.pt", weights_only=True)
+            report = (Path(tmpdir) / "trial_1" / "report.md").read_text(encoding="utf-8")
+        self.assertEqual(result["monitor"], "val_accuracy")
+        self.assertEqual(len(result["val_accuracy"]), 1)
+        self.assertEqual(checkpoint["score"], result["val_accuracy"][0])
+        self.assertEqual(checkpoint["mode"], "max")
+        self.assertIn("Validation Accuracy", report)
+
+    def test_custom_runner_logs_configured_monitor(self):
+        config = {"experiment_name": "custom_accuracy", "training": {"monitor": "val_accuracy"}}
+
+        def runner(*args, **kwargs):
+            return {"train_loss": [0.2, 0.1], "val_loss": [0.1, 0.5], "val_accuracy": [0.6, 0.9]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertLogs("bokete.experiments", level="INFO") as logs:
+                run_experiments(config, run_fn=runner, output_dir=tmpdir)
+            report = (Path(tmpdir) / "config-report.md").read_text(encoding="utf-8")
+        self.assertTrue(any("Best Validation Accuracy:" in entry for entry in logs.output))
+        self.assertIn("Selected Validation Accuracy", report)
+
     def test_example_run(self):
         import runpy
         import sys

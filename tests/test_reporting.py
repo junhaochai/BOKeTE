@@ -5,6 +5,7 @@ Unit tests for bokete reporting functions (training_report, trial_report, config
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import torch.nn as nn
 
@@ -17,6 +18,70 @@ from bokete.reporting import (
 
 
 class TestReporting(unittest.TestCase):
+
+    def test_bare_history_uses_configured_monitor_in_report_and_plot(self):
+        config = {"training": {"monitor": "val_accuracy"}}
+        history = {"train_loss": [0.3, 0.2], "val_loss": [0.1, 0.5], "val_accuracy": [0.6, 0.9]}
+        with patch("bokete.reporting.plotting.plot_loss_curves") as plot:
+            report = trial_report(config, metrics=history)
+        self.assertIn("**Selected Epoch:** `2` (Validation Accuracy: `0.9`)", report)
+        self.assertEqual(plot.call_args.kwargs['best_epoch'], 2)
+        self.assertEqual(plot.call_args.kwargs['metrics']['monitor'], 'val_accuracy')
+        self.assertNotIn('monitor', history)
+        aggregate = config_report(config, [history], auto_plot=False)
+        self.assertIn("| Trial 1 | `2` | `0.9` |", aggregate)
+
+    def test_trial_report_rejects_conflicting_monitor_metadata(self):
+        config = {"training": {"monitor": "val_accuracy"}}
+        history = {"train_loss": [0.2], "val_loss": [0.1], "monitor": "val_loss"}
+        with self.assertRaisesRegex(ValueError, "different monitoring"):
+            trial_report(config, metrics=history, auto_plot=False)
+
+    def test_sweep_honours_uniform_grid_monitor_override(self):
+        config = {"training": {"monitor": "val_loss"}}
+        for recorded in (False, True):
+            with self.subTest(recorded=recorded):
+                history = {"train_loss": [0.3, 0.2], "val_loss": [0.1, 0.5], "val_accuracy": [0.6, 0.9]}
+                if recorded:
+                    history['monitor'] = 'val_accuracy'
+                report = experiment_report(config, [{
+                    "parameters": {"training.monitor": "val_accuracy"}, "metrics": [history],
+                }])
+                self.assertIn("**Selection Metric:** `val_accuracy` (maximise)", report)
+                self.assertIn("**Best Validation Accuracy:** `0.9000", report)
+
+    def test_accuracy_reports_and_sweep_follow_selected_metric(self):
+        config = {"experiment_name": "accuracy_selection", "training": {"monitor": "val_accuracy"}}
+        first = {"train_loss": [0.2, 0.1], "val_loss": [0.1, 0.5],
+                 "val_accuracy": [0.6, 0.9], "monitor": "val_accuracy"}
+        second = {"train_loss": [0.2, 0.1], "val_loss": [0.05, 0.04],
+                  "val_accuracy": [0.7, 0.8], "monitor": "val_accuracy"}
+        md = trial_report(config=config, metrics=first, auto_plot=False)
+        self.assertIn("**Selected Epoch:** `2` (Validation Accuracy: `0.9`)", md)
+        self.assertIn("Selected Epoch Validation Loss | `0.5`", md)
+        self.assertIn("Final Validation Accuracy | `0.9`", md)
+        self.assertIn("| 2 | 0.1000 | 0.5000 | 0.9000 |", md)
+        aggregate = config_report(config, [second, first], auto_plot=False)
+        self.assertIn("Best Trial Validation Accuracy:** `0.9000` (Trial 2)", aggregate)
+        self.assertIn("| Trial 2 | `2` | `0.9` |", aggregate)
+        sweep = experiment_report(config, [
+            {"parameters": {"model.name": "lower_loss"}, "metrics": [second]},
+            {"parameters": {"model.name": "higher_accuracy"}, "metrics": [first]},
+        ])
+        self.assertIn("**Configuration:** `model.name=higher_accuracy`", sweep)
+        self.assertIn("| 1 | `model.name=higher_accuracy` |", sweep)
+        self.assertIn("**Selection Metric:** `val_accuracy` (maximise)", sweep)
+
+    def test_sweep_rejects_mixed_monitors(self):
+        with self.assertRaisesRegex(ValueError, "different monitoring"):
+            experiment_report({}, [
+                {"metrics": [{"val_loss": [0.1], "monitor": "val_loss"}]},
+                {"metrics": [{"val_accuracy": [0.9], "monitor": "val_accuracy"}]},
+            ])
+
+    def test_accuracy_report_requires_recorded_accuracy(self):
+        with self.assertRaisesRegex(ValueError, "no accuracy history"):
+            training_report({"train_loss": [0.1], "val_loss": [0.2], "monitor": "val_accuracy"})
 
     def test_training_report(self):
         metrics_dict = {

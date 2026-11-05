@@ -22,6 +22,7 @@ class TrainingConfig:
     loss: str = "CrossEntropyLoss"
     patience: Optional[int] = 3
     save_checkpoints: bool = True
+    monitor: str = "val_accuracy"
 
 
 @dataclass

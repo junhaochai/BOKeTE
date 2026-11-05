@@ -7,7 +7,7 @@ Key Functions:
 """
 
 import copy
-from dataclasses import is_dataclass
+from dataclasses import asdict, is_dataclass
 import itertools
 import logging
 import shutil
@@ -20,6 +20,7 @@ import numpy as np
 import torch
 
 import bokete.reporting as reporting
+import bokete.metrics as metrics_mod
 import bokete.training as training
 import bokete.utils as utils
 
@@ -38,6 +39,10 @@ def _run_trials(
     exp_label = config.get("experiment_name") if isinstance(config, dict) else getattr(config, "experiment_name", None)
     if not exp_label or not str(exp_label).strip():
         raise ValueError("Configuration must explicitly define 'experiment_name'.")
+    monitor_config = asdict(config) if is_dataclass(config) else config
+    configured_monitor = utils.get_nested_key(monitor_config, "training.monitor")
+    if configured_monitor is not None:
+        metrics_mod.monitor_mode(configured_monitor)
 
     if output_dir is None:
         run_dir_path = utils.create_run_directory(config, attach_file_logger=True)
@@ -64,11 +69,12 @@ def _run_trials(
             metrics = run_fn(i, config, output_dir=output_dir, total_trials=num_trials)
             if metrics:
                 all_trial_metrics.append(metrics)
-                val_losses = metrics.get('val_loss') or []
-                if val_losses:
-                    best_val = min(val_losses)
+                selection = metrics_mod.selection_summary(metrics, configured_monitor)
+                if selection['best_score'] is not None:
+                    best_val = selection['best_score']
+                    metric_label = utils.format_metric_name(selection['monitor'])
                     logger.info("")
-                    logger.info(f"[BOKeTE] Trial {i} complete — Best Val Loss: {utils.Colours.BRIGHT_CYAN}{best_val:.4f}{utils.Colours.RESET}")
+                    logger.info(f"[BOKeTE] Trial {i} complete — Best {metric_label}: {utils.Colours.BRIGHT_CYAN}{best_val:.4f}{utils.Colours.RESET}")
                 else:
                     logger.info("")
                     logger.info(f"[BOKeTE] Trial {i} complete")
@@ -91,8 +97,9 @@ def _run_trials(
                 model=active_model,
             )
 
-        # Log summary statistics if validation losses were recorded
-        best_val_losses = [min(m['val_loss']) for m in all_trial_metrics if m and 'val_loss' in m and m['val_loss']]
+        # Reuse the monitored scores already recorded by each trial.
+        selections = [metrics_mod.selection_summary(m, configured_monitor) for m in all_trial_metrics]
+        best_val_losses = [s['best_score'] for s in selections if s['best_score'] is not None]
         if best_val_losses:
             mean_val = float(np.mean(best_val_losses))
             std_val = float(np.std(best_val_losses))
@@ -106,7 +113,7 @@ def _run_trials(
                 f"(Start: {start_time}, End: {end_time}) ==="
             )
             logger.info(
-                f"[BOKeTE] Mean Best Val Loss: {utils.Colours.BRIGHT_CYAN}{mean_val:.4f} ± {std_val:.4f}{utils.Colours.RESET} "
+                f"[BOKeTE] Mean Best {utils.format_metric_name(selections[0]['monitor'])}: {utils.Colours.BRIGHT_CYAN}{mean_val:.4f} ± {std_val:.4f}{utils.Colours.RESET} "
                 f"(Min: {utils.Colours.CYAN}{min_val:.4f}{utils.Colours.RESET}, Max: {utils.Colours.CYAN}{max_val:.4f}{utils.Colours.RESET})"
             )
             logger.info("")
@@ -281,6 +288,8 @@ def create_trial_runner(
         # 1. Set seed per trial for stochastic variance
         base_seed = config.get("seed", 42)
         trial_seed = base_seed + (trial_num - 1)
+        monitor = utils.get_nested_key(config, "training.monitor", default="val_loss")
+        metrics_mod.monitor_mode(monitor)
         utils.set_seed(trial_seed)
 
         if not output_dir:
@@ -343,6 +352,7 @@ def create_trial_runner(
                 early_stopping=early_stopping_obj,
                 checkpoint=checkpoint,
                 log_interval=log_interval,
+                monitor=monitor,
             )
 
             # 6. Evaluate post-training test metrics if test_fn provided (for both Final and Best checkpoints)
@@ -358,7 +368,7 @@ def create_trial_runner(
 
                 # 6b. Evaluate Best epoch weights (loaded from best.pt if available)
                 best_ckpt_path = trial_dir / "checkpoints" / "best.pt"
-                if checkpoint.best_loss < float("inf") and best_ckpt_path.exists():
+                if checkpoint.best_saved and best_ckpt_path.exists():
                     ckpt_data = torch.load(best_ckpt_path, map_location="cpu", weights_only=False)
                     raw_model = getattr(model, "module", model)
                     raw_model.load_state_dict(ckpt_data["model_state_dict"])
