@@ -7,14 +7,15 @@ Key Functions:
 
 from pathlib import Path
 import logging
-import matplotlib.pyplot as plt
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
 
-def _finalise_plot(fig, ax, save_path: Path, title: str, log_label: str) -> None:
-    """Applies BOKeTE plot styling, saves figure to disk, and closes canvas."""
+def _finalise_plot(fig: Figure, ax, save_path: Path, title: str, log_label: str) -> None:
+    """Applies BOKeTE plot styling and saves figure to disk."""
     ax.set_title(title, fontsize=14, pad=15)
     ax.set_xlabel('Epochs', fontsize=12)
     ax.set_ylabel('Loss', fontsize=12)
@@ -27,8 +28,6 @@ def _finalise_plot(fig, ax, save_path: Path, title: str, log_label: str) -> None
         logger.info(f"[BOKeTE] Saved {log_label} plot to: {save_path}")
     except Exception as e:
         logger.error(f"Failed to save {log_label} plot to {save_path}: {e}")
-    finally:
-        plt.close(fig)
 
 
 def plot_loss_curves(
@@ -70,7 +69,9 @@ def plot_loss_curves(
     save_path = Path(path)
 
     # Generate Static Matplotlib Plot
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig = Figure(figsize=(10, 5))
+    FigureCanvasAgg(fig)
+    ax = fig.add_subplot(111)
 
     ax.plot(epochs, train_loss[:num_epochs], label='Train Loss', color='#2b5c8f', linewidth=2)
     ax.plot(epochs, val_loss[:num_epochs], label='Validation Loss', color='#d95f02', linewidth=2)
@@ -110,7 +111,9 @@ def plot_multi_trial_loss_curves(
 
     save_path = Path(path)
 
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig = Figure(figsize=(10, 5))
+    FigureCanvasAgg(fig)
+    ax = fig.add_subplot(111)
 
     # Individual faint trial lines
     for i in range(len(t_arr)):

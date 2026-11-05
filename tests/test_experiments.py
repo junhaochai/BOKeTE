@@ -5,12 +5,14 @@ Unit tests for bokete experiment orchestration (run_experiments, run_trials, cre
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from bokete.experiments import create_trial_runner, run_experiments
+from bokete.metrics import TrainingMetrics
 
 
 class TestExperiments(unittest.TestCase):
@@ -74,9 +76,36 @@ class TestExperiments(unittest.TestCase):
                 "experiment_name": "test_fn_test",
                 "training": {"epochs": 1, "lr": 0.01, "loss": "MSELoss", "optimizer": "Adam"},
             }
-            res = runner(1, config, output_dir=tmpdir)
+            with patch("bokete.experiments.torch.load", wraps=torch.load) as load_checkpoint:
+                res = runner(1, config, output_dir=tmpdir)
+            self.assertEqual(load_checkpoint.call_args.kwargs["map_location"], "cpu")
             self.assertIn("extra_metrics", res)
-            self.assertEqual(res["extra_metrics"]["test_accuracy"], 0.95)
+            self.assertEqual(res["extra_metrics"]["Best test_accuracy"], 0.95)
+            self.assertEqual(res["extra_metrics"]["Final test_accuracy"], 0.95)
+
+    def test_disabled_checkpoints_only_report_final_metrics(self):
+        history = TrainingMetrics(
+            train_loss=[0.2, 0.1], val_loss=[0.1, 0.5], best_epoch=1, best_val_loss=0.1,
+        )
+        runner = create_trial_runner(
+            lambda cfg: nn.Linear(1, 1),
+            lambda cfg: ([], []),
+            test_fn=lambda model, cfg: {"accuracy": 0.4},
+        )
+        config = {"experiment_name": "no_checkpoint", "training": {"save_checkpoints": False}}
+        for stale_checkpoint in (False, True):
+            with self.subTest(stale_checkpoint=stale_checkpoint), tempfile.TemporaryDirectory() as tmpdir:
+                if stale_checkpoint:
+                    checkpoint_dir = Path(tmpdir) / "trial_1" / "checkpoints"
+                    checkpoint_dir.mkdir(parents=True)
+                    # Invalid content must never be read when this run saves no checkpoint.
+                    (checkpoint_dir / "best.pt").write_bytes(b"previous run")
+                with patch("bokete.experiments.training.Trainer.fit", return_value=history):
+                    with patch("bokete.experiments.reporting.trial_report"):
+                        with patch("bokete.experiments.torch.load") as load_checkpoint:
+                            result = runner(1, config, output_dir=tmpdir)
+                load_checkpoint.assert_not_called()
+                self.assertEqual(result["extra_metrics"], {"Final accuracy": 0.4})
 
     def test_run_experiments(self):
         base_config = {"experiment_name": "exp_sweep", "training": {"lr": 0.01, "epochs": 1}}
@@ -126,6 +155,7 @@ class TestExperiments(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             res = run_experiments(config, num_trials=1, run_fn=runner, output_dir=tmpdir)
             self.assertEqual(res, [])
+            self.assertFalse(Path(tmpdir).exists())
 
 
 if __name__ == "__main__":

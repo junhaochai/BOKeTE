@@ -231,7 +231,7 @@ def trial_report(
     # Build Custom/Extra Metrics table rows if present
     extra_rows = ""
     if extra_metrics:
-        extra_rows = "\n" + "\n".join([f"| {k} | `{v}` |" for k, v in extra_metrics.items()])
+        extra_rows = "\n" + "\n".join([f"| {utils.format_metric_name(k)} | `{v}` |" for k, v in extra_metrics.items()])
 
     # Build Collapsible Per-Epoch Details Table
     epoch_rows = "\n".join([
@@ -328,7 +328,10 @@ def config_report(
         if num_vals:
             m_val = float(np.mean(num_vals))
             s_val = float(np.std(num_vals))
-            extra_summary_lines.append(f"- **Mean {k}:** `{m_val:.4f} ± {s_val:.4f}`\n")
+            fmt_k = utils.format_metric_name(k)
+            # Prevent duplicate prefix if metric is already aggregated (e.g. 'Mean Accuracy')
+            label = fmt_k if fmt_k.lower().startswith(("mean ", "average ")) else f"Mean {fmt_k}"
+            extra_summary_lines.append(f"- **{label}:** `{m_val:.4f} ± {s_val:.4f}`\n")
 
     extra_summary_str = "".join(extra_summary_lines)
 
@@ -351,7 +354,8 @@ def config_report(
     trial_table_header = "| Trial | Best Epoch | Best Val Loss | Final Train Loss | Final Validation Loss |"
     trial_table_align = "| :---: | :---: | :---: | :---: | :---: |"
     if extra_keys:
-        trial_table_header += " " + " | ".join(extra_keys) + " |"
+        formatted_extra_headers = [utils.format_metric_name(ek) for ek in extra_keys]
+        trial_table_header += " " + " | ".join(formatted_extra_headers) + " |"
         trial_table_align += " " + " | ".join([":---:"] * len(extra_keys)) + " |"
 
     trial_table = f"{trial_table_header}\n{trial_table_align}\n" + "\n".join(trial_rows)
@@ -473,16 +477,17 @@ def experiment_report(
     table_aligns = [":---:", ":---", ":---:"]
 
     for ek in all_extra_keys:
-        table_headers.append(f"Mean {ek}")
+        fmt_ek = utils.format_metric_name(ek)
+        header_name = fmt_ek if fmt_ek.lower().startswith(("mean ", "average ")) else f"Mean {fmt_ek}"
+        table_headers.append(header_name)
         table_aligns.append(":---:")
 
     table_headers.extend(["Mean Final Train Loss", "Mean Final Val Loss", "Trials"])
     table_aligns.extend([":---:", ":---:", ":---:"])
 
     rows = []
-    medals = ["🥇 1", "🥈 2", "🥉 3"]
     for rank_idx, combo in enumerate(sorted_combos, 1):
-        rank_badge = medals[rank_idx - 1] if rank_idx <= 3 else str(rank_idx)
+        rank_badge = str(rank_idx)
         val_str = f"`{combo['mean_best_val']:.4f} ± {combo['std_best_val']:.4f}`" if combo['mean_best_val'] is not None else "`N/A`"
         tr_str = f"`{combo['mean_final_train']:.4f}`" if combo['mean_final_train'] is not None else "`N/A`"
         fv_str = f"`{combo['mean_final_val']:.4f}`" if combo['mean_final_val'] is not None else "`N/A`"
@@ -502,10 +507,18 @@ def experiment_report(
 
     top_performer = sorted_combos[0] if sorted_combos else None
     if top_performer and top_performer["mean_best_val"] is not None:
-        best_details = [f"- **Optimal Configuration:** {top_performer['param_desc']}"]
+        best_details = [f"- **Configuration:** {top_performer['param_desc']}"]
         best_details.append(f"- **Best Validation Loss:** `{top_performer['mean_best_val']:.4f} ± {top_performer['std_best_val']:.4f}`")
         for ek, (mv, sv) in top_performer["extra_stats"].items():
-            best_details.append(f"- **Best {ek}:** `{mv:.4f} ± {sv:.4f}`")
+            fmt_ek = utils.format_metric_name(ek)
+            fmt_ek_lower = fmt_ek.lower()
+            # Avoid duplicate prefixes if create_trial_runner or the user already tagged
+            # the metric with checkpoint/aggregation context (e.g., 'Best Accuracy', 'Final Test Loss')
+            if fmt_ek_lower.startswith(("best ", "final ", "mean ", "lowest ", "highest ", "min ", "max ")):
+                label = fmt_ek
+            else:
+                label = f"Best {fmt_ek}"
+            best_details.append(f"- **{label}:** `{mv:.4f} ± {sv:.4f}`")
         winner_box = "\n".join(best_details)
     else:
         winner_box = "- No winning configuration determined."
@@ -524,7 +537,7 @@ def experiment_report(
 {exp_bullet}{start_line}{end_line}{dur_line}{dev_line}- **Configurations Tested:** `{total_configs}`
 - **Total Executions:** `{sum(c['num_trials'] for c in processed_combos)}` trials
 
-## Executive Summary
+## Optimal Configuration
 {winner_box}
 
 ## Comparative Leaderboard

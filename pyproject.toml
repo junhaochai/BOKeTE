@@ -44,5 +44,5 @@ dev = [
 packages = ["src/bokete"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"example" = "bokete/template"
+"example" = "bokete/example"
 

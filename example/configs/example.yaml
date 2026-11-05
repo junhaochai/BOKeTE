@@ -21,3 +21,4 @@ training:
   optimizer: "Adam"
   loss: "CrossEntropyLoss"
   patience: 3
+  save_checkpoints: true

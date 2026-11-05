@@ -56,6 +56,18 @@ class TestUtils(unittest.TestCase):
         self.assertEqual(format_duration(135.0), "02m 15s")
         self.assertEqual(format_duration(3665.0), "01h 01m 05s")
 
+    def test_format_metric_name(self):
+        from bokete.utils import format_metric_name
+        self.assertEqual(format_metric_name("test_loss"), "Test Loss")
+        self.assertEqual(format_metric_name("val_loss"), "Validation Loss")
+        self.assertEqual(format_metric_name("train_loss"), "Train Loss")
+        self.assertEqual(format_metric_name("accuracy"), "Accuracy")
+        self.assertEqual(format_metric_name("f1_score"), "F1 Score")
+        self.assertEqual(format_metric_name("Best test_loss"), "Best Test Loss")
+        self.assertEqual(format_metric_name("Final accuracy"), "Final Accuracy")
+        self.assertEqual(format_metric_name("Mean Best Val Loss"), "Mean Best Validation Loss")
+        self.assertEqual(format_metric_name(""), "")
+
     def test_get_nested_key(self):
         cfg = {
             "experiment_name": "test_exp",

@@ -195,6 +195,37 @@ def format_duration(seconds: Optional[float]) -> str:
     return f"{minutes:02d}m {secs:02d}s"
 
 
+def format_metric_name(name: str) -> str:
+    """Formats metric keys or column names into clean, human-readable Title Case labels.
+
+    Handles snake_case conversion, common ML abbreviation expansion (val -> Validation,
+    acc -> Accuracy, lr -> Learning Rate), and preserves uppercase acronyms (F1, BLEU, AUC, etc.).
+    """
+    if not name:
+        return ""
+
+    clean = name.replace("_", " ").strip()
+
+    word_map = {
+        "val": "Validation",
+        "acc": "Accuracy",
+        "lr": "Learning Rate",
+    }
+
+    words = clean.split()
+    formatted = []
+    for w in words:
+        w_lower = w.lower()
+        if w_lower in word_map:
+            formatted.append(word_map[w_lower])
+        elif w.isupper() and len(w) > 1:
+            formatted.append(w)
+        else:
+            formatted.append(w.capitalize())
+
+    return " ".join(formatted)
+
+
 def determine_device(verbose: bool = True) -> torch.device:
     """Return the best available PyTorch device: CUDA, MPS (Mac), or CPU."""
     if torch.cuda.is_available():
@@ -246,6 +277,7 @@ def load_config(config_path: str | Path) -> Dict[str, Any]:
             f"Unsupported configuration file extension '{path.suffix}'. Only .yaml and .yml files are supported."
         )
 
+    setup_logging()
     logger.info("")
     logger.info(f"[BOKeTE] Loading configuration from: {path}")
 
@@ -487,12 +519,12 @@ def get_nested_key(d: Dict[str, Any], key_path: str, default: Any = None) -> Any
     Handles missing keys, non-dict intermediate values, and explicit None entries without raising exceptions.
     """
     keys = key_path.split(".")
-    curr: Any = d
+    current: Any = d
     for k in keys:
-        if not isinstance(curr, dict) or k not in curr:
+        if not isinstance(current, dict) or k not in current:
             return default
-        curr = curr[k]
-    return curr if curr is not None else default
+        current = current[k]
+    return current if current is not None else default
 
 
 def set_nested_key(d: Dict[str, Any], key_path: str, value: Any) -> None:

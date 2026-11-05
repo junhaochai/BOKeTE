@@ -245,7 +245,38 @@ class TestReporting(unittest.TestCase):
             self.assertIn("model.kbl_layers=[1]", md)
             self.assertIn("0.0900", md)  # best val loss for combo 2: mean(0.1, 0.08) = 0.09
             self.assertIn("Mean Test Accuracy", md)
+            self.assertIn("- **Best Test Accuracy:** `0.9825 ± 0.0025`", md)
             self.assertTrue((Path(tmpdir) / "experiment-report.md").exists())
+
+    def test_master_experiment_report_no_duplicate_best_prefix(self):
+        config = {"experiment_name": "prefix_test", "lr": 0.001}
+        sweep_results = [
+            {
+                "parameters": {"training.lr": 0.001},
+                "metrics": [
+                    {
+                        "val_loss": [0.1],
+                        "train_loss": [0.1],
+                        "extra_metrics": {
+                            "Best accuracy": 0.9765,
+                            "Best test_loss": 0.0753,
+                            "Final accuracy": 0.9759,
+                            "Final test_loss": 0.0778,
+                        },
+                    }
+                ],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            md = experiment_report(config=config, sweep_results=sweep_results, save_path=tmpdir)
+            self.assertIn("## Optimal Configuration", md)
+            self.assertIn("- **Configuration:** `training.lr=0.001`", md)
+            self.assertIn("- **Best Accuracy:** `0.9765 ± 0.0000`", md)
+            self.assertIn("- **Best Test Loss:** `0.0753 ± 0.0000`", md)
+            self.assertIn("- **Final Accuracy:** `0.9759 ± 0.0000`", md)
+            self.assertIn("- **Final Test Loss:** `0.0778 ± 0.0000`", md)
+            self.assertNotIn("Best Best", md)
+            self.assertNotIn("Best Final", md)
 
 
 if __name__ == "__main__":

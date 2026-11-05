@@ -226,7 +226,7 @@ class Trainer:
                     self._variable_shapes_detected = True
                     torch.backends.cudnn.benchmark = False
 
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
 
             with torch.autocast(device_type=self.device.type, enabled=self.amp_active):
                 outputs = self.model(inputs)

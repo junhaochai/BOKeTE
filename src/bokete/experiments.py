@@ -2,9 +2,8 @@
 Orchestration of hyperparameter sweeps and multi-trial experimental runs.
 
 Key Functions:
-  - run_experiments   : Generates parameter grid combinations and executes run_fn for each.
-  - run_trials        : Executes a single experiment configuration across multiple random seed trials.
-  - create_trial_runner: Helper factory that builds a standardized single-trial runner callback.
+  - run_experiments   : Executes single-config multi-trial runs or hyperparameter grid sweeps.
+  - create_trial_runner: Helper factory that builds a standardised single-trial runner callback.
 """
 
 import copy
@@ -35,7 +34,7 @@ def _run_trials(
     output_dir: Optional[str] = None,
     model: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
-    """Internal helper that runs a single configuration across multiple seed trials."""
+    """Executes all trials for a configuration, aggregating metrics, loss plots, and reports."""
     exp_label = config.get("experiment_name") if isinstance(config, dict) else getattr(config, "experiment_name", None)
     if not exp_label or not str(exp_label).strip():
         raise ValueError("Configuration must explicitly define 'experiment_name'.")
@@ -46,7 +45,6 @@ def _run_trials(
     else:
         utils.setup_logging(log_file=Path(output_dir) / "experiment.log")
 
-    utils.setup_logging()
     all_trial_metrics = []
 
     start_dt = datetime.now()
@@ -62,7 +60,6 @@ def _run_trials(
             active_model = None
 
     try:
-        base_seed = config.get("seed", 42) if isinstance(config, dict) else getattr(config, "seed", 42)
         for i in range(1, num_trials + 1):
             metrics = run_fn(i, config, output_dir=output_dir, total_trials=num_trials)
             if metrics:
@@ -75,6 +72,44 @@ def _run_trials(
                 else:
                     logger.info("")
                     logger.info(f"[BOKeTE] Trial {i} complete")
+        t1 = time.time()
+        end_dt = datetime.now()
+        end_time = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+        duration_seconds = round(t1 - t0, 2)
+
+        # Guard: Ensure output directory exists and metrics were produced before generating report
+        # (prevents errors on empty runs and enables partial reports for completed trials on KeyboardInterrupt)
+        if output_dir and all_trial_metrics:
+            logger.info("")
+            reporting.config_report(
+                config=config,
+                all_trial_metrics=all_trial_metrics,
+                save_path=output_dir,
+                start_time=start_time,
+                end_time=end_time,
+                duration_seconds=duration_seconds,
+                model=active_model,
+            )
+
+        # Log summary statistics if validation losses were recorded
+        best_val_losses = [min(m['val_loss']) for m in all_trial_metrics if m and 'val_loss' in m and m['val_loss']]
+        if best_val_losses:
+            mean_val = float(np.mean(best_val_losses))
+            std_val = float(np.std(best_val_losses))
+            min_val = float(np.min(best_val_losses))
+            max_val = float(np.max(best_val_losses))
+            summary_label = f" for {utils.format_tag(exp_label)}" if exp_label else ""
+            logger.info("")
+            logger.info(
+                f"[BOKeTE] === Experiment Complete{summary_label} ({len(best_val_losses)} Trials) | "
+                f"Time Taken: {utils.Colours.BRIGHT_CYAN}{utils.format_duration(duration_seconds)}{utils.Colours.RESET} "
+                f"(Start: {start_time}, End: {end_time}) ==="
+            )
+            logger.info(
+                f"[BOKeTE] Mean Best Val Loss: {utils.Colours.BRIGHT_CYAN}{mean_val:.4f} ± {std_val:.4f}{utils.Colours.RESET} "
+                f"(Min: {utils.Colours.CYAN}{min_val:.4f}{utils.Colours.RESET}, Max: {utils.Colours.CYAN}{max_val:.4f}{utils.Colours.RESET})"
+            )
+            logger.info("")
     except KeyboardInterrupt:
         utils.close_file_loggers()
         if not all_trial_metrics and output_dir and Path(output_dir).exists():
@@ -82,45 +117,6 @@ def _run_trials(
         raise
     finally:
         utils.close_file_loggers()
-
-    t1 = time.time()
-    end_dt = datetime.now()
-    end_time = end_dt.strftime("%Y-%m-%d %H:%M:%S")
-    duration_seconds = round(t1 - t0, 2)
-
-    # Guard: Ensure output directory exists and metrics were produced before generating report
-    # (prevents errors on empty runs and enables partial reports for completed trials on KeyboardInterrupt)
-    if output_dir and all_trial_metrics:
-        logger.info("")
-        reporting.config_report(
-            config=config,
-            all_trial_metrics=all_trial_metrics,
-            save_path=output_dir,
-            start_time=start_time,
-            end_time=end_time,
-            duration_seconds=duration_seconds,
-            model=active_model,
-        )
-
-    # Log summary statistics if validation losses were recorded
-    best_val_losses = [min(m['val_loss']) for m in all_trial_metrics if m and 'val_loss' in m and m['val_loss']]
-    if best_val_losses:
-        mean_val = float(np.mean(best_val_losses))
-        std_val = float(np.std(best_val_losses))
-        min_val = float(np.min(best_val_losses))
-        max_val = float(np.max(best_val_losses))
-        summary_label = f" for {utils.format_tag(exp_label)}" if exp_label else ""
-        logger.info("")
-        logger.info(
-            f"[BOKeTE] === Experiment Complete{summary_label} ({len(best_val_losses)} Trials) | "
-            f"Time Taken: {utils.Colours.BRIGHT_CYAN}{utils.format_duration(duration_seconds)}{utils.Colours.RESET} "
-            f"(Start: {start_time}, End: {end_time}) ==="
-        )
-        logger.info(
-            f"[BOKeTE] Mean Best Val Loss: {utils.Colours.BRIGHT_CYAN}{mean_val:.4f} ± {std_val:.4f}{utils.Colours.RESET} "
-            f"(Min: {utils.Colours.CYAN}{min_val:.4f}{utils.Colours.RESET}, Max: {utils.Colours.CYAN}{max_val:.4f}{utils.Colours.RESET})"
-        )
-        logger.info("")
 
     return all_trial_metrics
 
@@ -149,11 +145,17 @@ def run_experiments(
     if target_config is None:
         raise ValueError("A configuration dictionary must be provided to run_experiments().")
 
+    # Initialise console logger immediately so pre-trial banners are never dropped
+    utils.setup_logging()
+
     grid = param_grid
     if grid is None and isinstance(target_config, dict):
         grid = target_config.get("param_grid")
     elif grid is None and is_dataclass(target_config):
         grid = getattr(target_config, "param_grid", None)
+
+    n_trials = num_trials or (target_config.get("trials", 1) if isinstance(target_config, dict) else getattr(target_config, "trials", 1))
+    exp_name = target_config.get("experiment_name") if isinstance(target_config, dict) else getattr(target_config, "experiment_name", None)
 
     if grid:
         keys = list(grid.keys())
@@ -164,10 +166,6 @@ def run_experiments(
         base_cfg = copy.deepcopy(target_config)
         if isinstance(base_cfg, dict):
             base_cfg.pop("param_grid", None)
-
-        n_trials = num_trials or (base_cfg.get("trials", 1) if isinstance(base_cfg, dict) else getattr(base_cfg, "trials", 1))
-
-        exp_name = target_config.get("experiment_name") if isinstance(target_config, dict) else getattr(target_config, "experiment_name", None)
 
         sweep_start_dt = datetime.now()
         sweep_start_time = sweep_start_dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -220,7 +218,15 @@ def run_experiments(
         sweep_end_time = sweep_end_dt.strftime("%Y-%m-%d %H:%M:%S")
         sweep_duration = round(sweep_t1 - sweep_t0, 2)
 
+        total_trials_run = sum(len(r.get("metrics", [])) for r in results)
         logger.info("")
+        logger.info(
+            f"[BOKeTE] === Experiment Sweep Complete for {utils.format_tag(exp_name)} "
+            f"({len(results)} Configurations, {total_trials_run} Trials) | "
+            f"Time Taken: {utils.Colours.BRIGHT_CYAN}{utils.format_duration(sweep_duration)}{utils.Colours.RESET} "
+            f"(Start: {sweep_start_time}, End: {sweep_end_time}) ==="
+        )
+
         reporting.experiment_report(
             config=target_config,
             sweep_results=results,
@@ -230,9 +236,6 @@ def run_experiments(
             duration_seconds=sweep_duration,
         )
         return results
-
-    n_trials = num_trials or (target_config.get("trials", 1) if isinstance(target_config, dict) else getattr(target_config, "trials", 1))
-    exp_name = target_config.get("experiment_name") if isinstance(target_config, dict) else getattr(target_config, "experiment_name", None)
 
     try:
         return _run_trials(
@@ -257,7 +260,7 @@ def create_trial_runner(
     test_fn: Optional[Callable[[Any, Dict[str, Any]], Dict[str, Any]]] = None,
     log_model_structure: bool = True,
 ) -> Callable[..., Dict[str, Any]]:
-    """Helper factory that constructs a standardized single-trial runner callback for bokete.run_experiments.
+    """Helper factory that constructs a standardised single-trial runner callback for bokete.run_experiments.
 
     Args:
         model_factory: Callable `(config) -> torch.nn.Module`.
@@ -315,36 +318,56 @@ def create_trial_runner(
             device = utils.determine_device(verbose=is_first_trial)
             should_log_struct = log_model_structure and is_first_trial
 
+            amp = bool(utils.get_nested_key(config, "training.amp", default=False))
             trainer = training.Trainer(
                 model,
                 criterion,
                 optimizer,
                 device=device,
+                amp=amp,
                 log_model_structure=should_log_struct,
             )
 
             epochs = utils.get_nested_key(config, "training.epochs") or 5
             patience = utils.get_nested_key(config, "training.patience")
             early_stopping_obj = training.EarlyStopping(patience=patience) if patience is not None and patience > 0 else None
-            save_ckpts = utils.get_nested_key(config, "training.save_checkpoints")
-            if save_ckpts is None:
-                save_ckpts = True
+            save_checkpoints = utils.get_nested_key(config, "training.save_checkpoints", default=True)
 
             log_interval = utils.get_nested_key(config, "training.log_interval") or 1
 
+            checkpoint = training.Checkpoint(trial_dir / "checkpoints", enabled=save_checkpoints)
             history = trainer.fit(
                 train_loader=train_loader,
                 val_loader=val_loader,
                 epochs=epochs,
                 early_stopping=early_stopping_obj,
-                checkpoint=training.Checkpoint(trial_dir / "checkpoints", enabled=save_ckpts),
+                checkpoint=checkpoint,
                 log_interval=log_interval,
             )
 
-            # 6. Evaluate post-training test metrics if test_fn provided
-            extra_metrics = None
+            # 6. Evaluate post-training test metrics if test_fn provided (for both Final and Best checkpoints)
+            extra_metrics = {}
             if test_fn:
-                extra_metrics = test_fn(model, test_loader, config) if test_loader is not None else test_fn(model, config)
+                def _eval_model(m):
+                    return test_fn(m, test_loader, config) if test_loader is not None else test_fn(m, config)
+
+                # 6a. Evaluate Final epoch weights (current in-memory state)
+                raw_final_metrics = _eval_model(model) or {}
+                for k, v in raw_final_metrics.items():
+                    extra_metrics[f"Final {k}"] = v
+
+                # 6b. Evaluate Best epoch weights (loaded from best.pt if available)
+                best_ckpt_path = trial_dir / "checkpoints" / "best.pt"
+                if checkpoint.best_loss < float("inf") and best_ckpt_path.exists():
+                    ckpt_data = torch.load(best_ckpt_path, map_location="cpu", weights_only=False)
+                    raw_model = getattr(model, "module", model)
+                    raw_model.load_state_dict(ckpt_data["model_state_dict"])
+                    del ckpt_data
+                    raw_best_metrics = _eval_model(model) or {}
+                    for k, v in raw_best_metrics.items():
+                        extra_metrics[f"Best {k}"] = v
+
+            extra_metrics = extra_metrics if extra_metrics else None
 
             # 7. Generate per-trial Markdown report
             reporting.trial_report(
