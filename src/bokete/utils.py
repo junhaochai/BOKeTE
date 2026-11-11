@@ -24,7 +24,7 @@ import os
 import random
 import sys
 from pathlib import Path
-from typing import Dict, Any, Optional, Sequence, Type, TypeVar, Union
+from typing import Dict, Any, Optional, Sequence, Type, TypeVar, Union, get_args, get_type_hints
 
 import numpy as np
 import torch
@@ -248,6 +248,8 @@ def determine_device(verbose: bool = True) -> torch.device:
 def resolve_config_path(config_path: str | Path) -> Path:
     """Resolves a config path, auto-appending .yaml for short names inside the configs/ directory."""
     p = Path(config_path)
+    if p.is_file() or p.parent != Path("."):
+        return p
     name = f"{p.stem}.yaml" if not p.suffix else p.name
     candidates = [Path("configs") / name, p]
     return next((c for c in candidates if c.is_file()), p)
@@ -491,8 +493,13 @@ def create_run_directory(
             if len(parts) == 2 and parts[1].isdigit():
                 existing_indices.append(int(parts[1]))
     next_idx = max(existing_indices, default=0) + 1
-    run_dir = target_parent / f"{date_prefix}-{next_idx:02d}"
-    run_dir.mkdir(parents=True, exist_ok=True)
+    while True:
+        run_dir = target_parent / f"{date_prefix}-{next_idx:02d}"
+        try:
+            run_dir.mkdir(exist_ok=False)
+            break
+        except FileExistsError:
+            next_idx += 1
 
     if attach_file_logger:
         setup_logging(log_file=run_dir / "experiment.log")
@@ -542,7 +549,9 @@ def load_config_as(config_path: str | Path, dataclass_cls: Type[T]) -> T:
     """Loads a YAML configuration file directly into a user-defined @dataclass instance.
 
     Recursively converts nested dictionaries into nested dataclass instances where applicable.
-    Unspecified fields automatically retain their dataclass default values.
+    Unspecified fields automatically retain their dataclass default values;
+    explicit null values are preserved. Postponed annotations are resolved
+    before converting nested dataclasses.
     """
     raw = load_config(config_path)
 
@@ -550,12 +559,15 @@ def load_config_as(config_path: str | Path, dataclass_cls: Type[T]) -> T:
         if not is_dataclass(cls) or not isinstance(data, dict):
             return data
 
-        field_types = {f.name: f.type for f in fields(cls)}
+        field_types = get_type_hints(cls)
         kwargs = {}
         for f in fields(cls):
-            if f.name in data and data[f.name] is not None:
+            if f.name in data:
                 val = data[f.name]
                 target_type = field_types[f.name]
+                type_args = get_args(target_type)
+                if len(type_args) == 2 and type(None) in type_args:
+                    target_type = next(arg for arg in type_args if arg is not type(None))
                 if is_dataclass(target_type) and isinstance(val, dict):
                     kwargs[f.name] = _from_dict(target_type, val)
                 else:

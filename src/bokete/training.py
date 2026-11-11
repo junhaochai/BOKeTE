@@ -10,9 +10,11 @@ Key Classes & Functions:
 
 from datetime import datetime
 import logging
+import math
 import os
 from pathlib import Path
 import random
+import tempfile
 import time
 from typing import Any, Callable, List, Optional
 
@@ -29,6 +31,99 @@ import bokete.utils as utils
 
 
 logger = logging.getLogger(__name__)
+
+
+def _atomic_save(state, destination):
+    with tempfile.NamedTemporaryFile(
+        dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp", delete=False,
+    ) as handle:
+        temporary = Path(handle.name)
+    try:
+        torch.save(state, temporary)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _valid_targets(criterion, targets):
+    if not isinstance(targets, torch.Tensor):
+        return None
+    ignore_index = getattr(criterion, "ignore_index", None)
+    if ignore_index is not None and not targets.is_floating_point():
+        return targets != ignore_index
+    return torch.ones_like(targets, dtype=torch.bool)
+
+
+def _loss_weight(criterion, outputs, targets):
+    """Denominator of a batch mean, used to pool scalar losses across an epoch."""
+    reduction = getattr(criterion, "reduction", "mean")
+    if reduction not in ("mean", "sum", "batchmean"):
+        raise ValueError("Loss reporting requires a scalar mean, sum or batchmean reduction.")
+    if reduction == "batchmean" or not isinstance(targets, torch.Tensor):
+        return outputs.shape[0] if isinstance(outputs, torch.Tensor) and outputs.ndim else 1
+    if isinstance(criterion, (torch.nn.CrossEntropyLoss, torch.nn.NLLLoss)):
+        if targets.is_floating_point():
+            class_dim = 1 if targets.ndim > 1 else 0
+            return targets.numel() / targets.shape[class_dim]
+        valid_targets = targets[_valid_targets(criterion, targets)]
+        if reduction == "mean" and criterion.weight is not None:
+            return criterion.weight[valid_targets.long()].sum().item()
+        return valid_targets.numel()
+    if isinstance(criterion, (
+        torch.nn.L1Loss, torch.nn.MSELoss, torch.nn.SmoothL1Loss, torch.nn.HuberLoss,
+        torch.nn.BCELoss, torch.nn.BCEWithLogitsLoss, torch.nn.KLDivLoss,
+        torch.nn.PoissonNLLLoss, torch.nn.SoftMarginLoss, torch.nn.HingeEmbeddingLoss,
+    )):
+        return math.prod(torch.broadcast_shapes(outputs.shape, targets.shape))
+    # Custom scalar criteria are assumed to return a per-sample mean.
+    return targets.shape[0] if targets.ndim else 1
+
+
+def _loader_generators(loaders):
+    generators = {}
+    for name, loader in zip(("train", "val"), loaders):
+        for source, owner in (
+            ("loader", loader),
+            ("sampler", getattr(loader, "sampler", None)),
+        ):
+            generator = getattr(owner, "generator", None)
+            if isinstance(generator, torch.Generator):
+                generators[f"{name}.{source}"] = generator
+    return generators
+
+
+def _capture_rng_state(loaders):
+    name, keys, position, has_gauss, cached_gaussian = np.random.get_state()
+    return {
+        "python": random.getstate(),
+        "numpy": (name, keys.tolist(), position, has_gauss, cached_gaussian),
+        "torch": torch.get_rng_state(),
+        "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+        "loaders": {
+            name: generator.get_state()
+            for name, generator in _loader_generators(loaders).items()
+        },
+    }
+
+
+def _restore_rng_state(state, loaders):
+    generators = _loader_generators(loaders)
+    if generators.keys() != state["loaders"].keys():
+        raise ValueError("Resume requires matching DataLoader generator configuration.")
+    cuda_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    if len(state["cuda"]) != cuda_count:
+        raise ValueError("Resume requires the same number of visible CUDA devices.")
+
+    random.setstate(state["python"])
+    name, keys, position, has_gauss, cached_gaussian = state["numpy"]
+    np.random.set_state((
+        name, np.asarray(keys, dtype=np.uint32), position, has_gauss, cached_gaussian,
+    ))
+    torch.set_rng_state(state["torch"])
+    if state["cuda"]:
+        torch.cuda.set_rng_state_all(state["cuda"])
+    for name, generator in generators.items():
+        generator.set_state(state["loaders"][name])
 
 
 class EarlyStopping:
@@ -58,6 +153,22 @@ class EarlyStopping:
             self.bad_epochs += 1
         return self.bad_epochs >= self.patience
 
+    def state_dict(self):
+        """Return the stopping policy and accumulated patience state."""
+        return {
+            "patience": self.patience,
+            "min_delta": self.min_delta,
+            "best_score": self.best_score,
+            "bad_epochs": self.bad_epochs,
+        }
+
+    def load_state_dict(self, state):
+        """Restore the stopping policy and accumulated patience state."""
+        self.patience = state["patience"]
+        self.min_delta = state["min_delta"]
+        self.best_score = state["best_score"]
+        self.bad_epochs = state["bad_epochs"]
+
     def on_epoch_end(self, trainer: Any, epoch: int, val_loss: float) -> None:
         """Callback hook for Trainer fit loop."""
         score = val_loss if self.monitor == "val_loss" else trainer.current_metrics[self.monitor]
@@ -69,7 +180,9 @@ class Checkpoint:
     """
     Saves model weights during training: 'last.pt' every epoch and 'best.pt'
     whenever the monitored validation metric improves. Files contain the epoch,
-    validation loss, selection metadata and model state_dict.
+    validation loss, selection metadata and model state_dict. Trainer checkpoints
+    also contain the optimiser, scheduler, scaler, history and RNG state needed
+    to resume at a completed epoch boundary.
     """
 
     def __init__(self, directory, save_best=True, save_last=True, enabled=True, *, monitor="val_loss"):
@@ -82,7 +195,7 @@ class Checkpoint:
         self.best_score = None
         self.best_saved = False
 
-    def update(self, model, epoch, val_loss, optimizer=None, *, score=None):
+    def update(self, model, epoch, val_loss, optimizer=None, *, score=None, training_state=None):
         if not self.enabled or not (self.save_best or self.save_last):
             return
         if score is None:
@@ -90,8 +203,7 @@ class Checkpoint:
                 raise ValueError("An explicit score is required when monitoring validation accuracy.")
             score = val_loss
         improved = metrics.is_improvement(score, self.best_score, self.mode)
-        if improved:
-            self.best_score = score
+        best_score = score if improved else self.best_score
         self.directory.mkdir(parents=True, exist_ok=True)
         # Extract inner model from multi-GPU wrapper (DataParallel/DDP), or fallback to raw model on single-GPU/CPU
         raw_model = getattr(model, 'module', model)
@@ -101,22 +213,28 @@ class Checkpoint:
             'monitor': self.monitor,
             'mode': self.mode,
             'score': score,
-            'best_score': self.best_score,
+            'best_score': best_score,
             'model_state_dict': raw_model.state_dict(),
         }
         if optimizer is not None:
             state['optimizer_state_dict'] = optimizer.state_dict()
+        if training_state is not None:
+            state['training_state'] = training_state
 
         if self.save_last:
-            torch.save(state, self.directory / 'last.pt')
+            _atomic_save(state, self.directory / 'last.pt')
         if self.save_best and improved:
-            torch.save(state, self.directory / 'best.pt')
+            _atomic_save(state, self.directory / 'best.pt')
             self.best_saved = True
+        self.best_score = best_score
 
     def on_epoch_end(self, trainer: Any, epoch: int, val_loss: float) -> None:
         """Callback hook for Trainer fit loop."""
         score = val_loss if self.monitor == "val_loss" else trainer.current_metrics[self.monitor]
-        self.update(trainer.model, epoch, val_loss, optimizer=trainer.optimizer, score=score)
+        self.update(
+            trainer.model, epoch, val_loss, optimizer=trainer.optimizer, score=score,
+            training_state=trainer._checkpoint_state,
+        )
 
 
 def _default_prepare_batch(batch, device):
@@ -126,13 +244,16 @@ def _default_prepare_batch(batch, device):
 
 
 def evaluate(model, loader, criterion, device=None, prepare_batch=None, amp_active=False, *, collect_accuracy=False):
-    """Compute loss, and optionally top-1 accuracy, in one validation pass.
+    """Compute pooled epoch loss, and optionally top-1 accuracy, in one pass.
 
     Returns a float by default, or a val_loss/val_accuracy dict when
     collect_accuracy=True. Accuracy requires multiclass scores and integer
     class-index targets; it is weighted by valid samples, including a short last
     batch. Targets matching criterion.ignore_index are excluded. Batches with
     no valid targets are skipped; validation with no valid targets is rejected.
+    Mean losses use their sample/element or class-weight denominator; sum
+    reduction remains a sum. Custom scalar criteria are treated as per-sample
+    means. The same loss aggregation applies when accuracy is not collected.
     """
     device = torch.device(device) if device is not None else utils.determine_device()
 
@@ -141,31 +262,46 @@ def evaluate(model, loader, criterion, device=None, prepare_batch=None, amp_acti
 
     model.eval()
     running_loss = 0.0
-    batches = 0
+    total_weight = 0.0
     correct = 0
     total = 0
 
     with torch.inference_mode():
         for batch in loader:
             inputs, targets = prepare_batch(batch, device)
-            if collect_accuracy:
-                ignore_index = getattr(criterion, "ignore_index", None)
-                valid = targets != ignore_index if ignore_index is not None else torch.ones_like(targets, dtype=torch.bool)
-                if not valid.any():
-                    continue
+            valid = _valid_targets(criterion, targets)
+            if valid is not None and not valid.any():
+                continue
             with torch.autocast(device_type=device.type, enabled=amp_active):
                 outputs = model(inputs)
-                running_loss += criterion(outputs, targets).item()
+                weight = _loss_weight(criterion, outputs, targets)
+                if weight == 0:
+                    # A zero-weight class can still contribute label-smoothing
+                    # loss, and its samples still count towards accuracy.
+                    batch_total = (
+                        torch.nn.functional.cross_entropy(
+                            outputs, targets, weight=criterion.weight,
+                            ignore_index=criterion.ignore_index, reduction="sum",
+                            label_smoothing=criterion.label_smoothing,
+                        ).item() if isinstance(criterion, torch.nn.CrossEntropyLoss) else 0.0
+                    )
+                else:
+                    batch_loss = criterion(outputs, targets).item()
+                    batch_total = batch_loss if getattr(criterion, "reduction", "mean") == "sum" else batch_loss * weight
+            running_loss += batch_total
+            total_weight += weight
             if collect_accuracy:
-                if (outputs.ndim != 2 or outputs.shape[1] < 2 or targets.ndim != 1
+                if (not isinstance(targets, torch.Tensor)
+                        or outputs.ndim != 2 or outputs.shape[1] < 2 or targets.ndim != 1
                         or outputs.shape[0] != targets.shape[0]
                         or targets.dtype not in (torch.int8, torch.int16, torch.int32, torch.int64, torch.uint8)):
                     raise ValueError("val_accuracy requires [batch, classes] outputs and [batch] class-index targets.")
                 correct += ((outputs.argmax(dim=1) == targets) & valid).sum().item()
                 total += valid.sum().item()
-            batches += 1
 
-    loss = running_loss / max(batches, 1)
+    if total_weight == 0:
+        raise ValueError("Cannot evaluate an empty loader or with no valid targets.")
+    loss = running_loss if getattr(criterion, "reduction", "mean") == "sum" else running_loss / total_weight
     if collect_accuracy:
         if total == 0:
             raise ValueError("Cannot monitor validation accuracy on an empty loader or with no valid targets.")
@@ -211,7 +347,11 @@ class Trainer:
 
         # AMP only applies on CUDA; on CPU both autocast and the scaler become no-ops.
         self.amp_active = amp and self.device.type == 'cuda'
-        self.scaler = torch.amp.GradScaler('cuda', enabled=self.amp_active)
+        scaler_type = getattr(torch.amp, "GradScaler", None)
+        self.scaler = (
+            scaler_type('cuda', enabled=self.amp_active) if scaler_type is not None
+            else torch.cuda.amp.GradScaler(enabled=self.amp_active)
+        )
 
         # Track spatial shape consistency across batches for safe cuDNN benchmarking
         self._last_spatial_shape = None
@@ -244,6 +384,7 @@ class Trainer:
         """Run one training epoch over `train_loader` and return the mean training loss."""
         self.model.train()
         running_loss = 0.0
+        total_weight = 0.0
         batches_run = 0
 
         if epoch_idx and total_epochs:
@@ -264,6 +405,9 @@ class Trainer:
                 break
 
             inputs, targets = self.prepare_batch(batch, self.device)
+            valid = _valid_targets(self.criterion, targets)
+            if valid is not None and not valid.any():
+                continue
 
             # Auto-detect spatial shape consistency for cuDNN benchmarking
             if self.device.type == 'cuda' and not self._variable_shapes_detected:
@@ -279,6 +423,9 @@ class Trainer:
 
             with torch.autocast(device_type=self.device.type, enabled=self.amp_active):
                 outputs = self.model(inputs)
+                weight = _loss_weight(self.criterion, outputs, targets)
+                if weight == 0:
+                    raise ValueError("Cannot train a mean-reduced batch with zero total class weight.")
                 loss = self.criterion(outputs, targets)
 
             self.scaler.scale(loss).backward()
@@ -291,12 +438,15 @@ class Trainer:
             self.scaler.update()
 
             loss_val = loss.item()
-            running_loss += loss_val
+            running_loss += loss_val if getattr(self.criterion, "reduction", "mean") == "sum" else loss_val * weight
+            total_weight += weight
             batches_run += 1
-            avg_loss = running_loss / batches_run
+            avg_loss = running_loss if getattr(self.criterion, "reduction", "mean") == "sum" else running_loss / total_weight
             batch_pbar.set_postfix(loss=f"{avg_loss:.4f}", refresh=False)
 
-        return round(running_loss / max(batches_run, 1), 4)
+        if total_weight == 0:
+            raise ValueError("Cannot train on an empty loader or with no valid targets.")
+        return round(avg_loss, 4)
 
     def fit(
         self,
@@ -312,6 +462,7 @@ class Trainer:
         max_train_batches: Optional[int] = None,
         log_interval: int = 1,
         monitor: str = "val_loss",
+        resume_from: Optional[Any] = None,
     ) -> metrics.TrainingMetrics:
         """Train while selecting epochs by val_loss (min) or val_accuracy (max).
 
@@ -320,6 +471,13 @@ class Trainer:
         all collected values are available in trainer.current_metrics. A
         ReduceLROnPlateau scheduler receives the monitored score and must have
         the matching mode. Accuracy is collected only when it is monitored.
+
+        resume_from is a full-state checkpoint path, or None for a fresh run.
+        epochs is the total target, including previously completed epochs.
+        Resume requires matching model/optimiser configuration, AMP setting,
+        monitored metric and stateful callback types/order. History is retained;
+        timing describes this invocation. An exhausted target or a checkpoint
+        already stopped by early stopping performs no further training.
         """
         self.mode = metrics.monitor_mode(monitor)
         self.monitor = monitor
@@ -356,8 +514,59 @@ class Trainer:
             if isinstance(cb, torch.optim.lr_scheduler.ReduceLROnPlateau) and cb.mode != self.mode:
                 raise ValueError("ReduceLROnPlateau mode must match the monitored metric direction.")
 
+        loaders = (train_loader, val_loader)
+        checkpoints = [cb for cb in all_callbacks if isinstance(cb, Checkpoint)]
+        stateful_callbacks = [
+            cb for cb in all_callbacks
+            if not isinstance(cb, Checkpoint)
+            and callable(getattr(cb, "state_dict", None))
+            and callable(getattr(cb, "load_state_dict", None))
+        ]
+        callback_types = [
+            f"{type(cb).__module__}.{type(cb).__qualname__}"
+            for cb in stateful_callbacks
+        ]
+        history_fields = (
+            "train_loss", "val_loss", "val_accuracy",
+            "best_epoch", "best_val_loss", "best_score", "stopped_early",
+        )
+
+        start_epoch = 0
+        if resume_from is not None:
+            saved = torch.load(resume_from, map_location="cpu", weights_only=True)
+            state = saved.get("training_state")
+            if (state is None or state.get("version") != 1
+                    or "optimizer_state_dict" not in saved):
+                raise ValueError("Checkpoint does not contain supported full training state.")
+            if saved["monitor"] != monitor or saved["mode"] != self.mode:
+                raise ValueError("Resume requires the same monitored metric.")
+            if state["amp_active"] != self.amp_active:
+                raise ValueError("Resume requires the same AMP configuration.")
+            if state["callback_types"] != callback_types:
+                raise ValueError("Resume requires matching stateful callback types and order.")
+            if len(state["callback_states"]) != len(stateful_callbacks):
+                raise ValueError("Checkpoint callback state is incomplete.")
+
+            raw_model = getattr(self.model, "module", self.model)
+            raw_model.load_state_dict(saved["model_state_dict"])
+            for cb, cb_state in zip(stateful_callbacks, state["callback_states"]):
+                cb.load_state_dict(cb_state)
+            self.optimizer.load_state_dict(saved["optimizer_state_dict"])
+            self.scaler.load_state_dict(state["scaler_state_dict"])
+            for field in history_fields:
+                setattr(m_obj, field, state["history"][field])
+            for cb in checkpoints:
+                cb.best_score = m_obj.best_score
+
+            start_epoch = saved["epoch"]
+            self.should_stop = m_obj.stopped_early
+            _restore_rng_state(state["rng_state"], loaders)
+            del saved, state
+
         try:
-            for epoch in range(epochs):
+            for epoch in range(start_epoch, epochs):
+                if self.should_stop:
+                    break
                 train_loss = self._train_epoch(
                     train_loader,
                     max_batches=max_train_batches,
@@ -403,8 +612,10 @@ class Trainer:
                         f"Val Loss: {utils.Colours.BRIGHT_CYAN}{val_loss:.4f}{utils.Colours.RESET}{accuracy_log}{best_tag}"
                     )
 
-                # Process callbacks at end of epoch
+                # Finish state updates before writing the completed-epoch checkpoint.
                 for cb in all_callbacks:
+                    if isinstance(cb, Checkpoint):
+                        continue
                     if hasattr(cb, 'on_epoch_end'):
                         cb.on_epoch_end(self, epoch + 1, val_loss)
                     elif hasattr(cb, 'step'):
@@ -413,8 +624,23 @@ class Trainer:
                         else:
                             cb.step()
 
+                m_obj.stopped_early = self.should_stop
+                if checkpoints:
+                    self._checkpoint_state = {
+                        "version": 1,
+                        "amp_active": self.amp_active,
+                        "scaler_state_dict": self.scaler.state_dict(),
+                        "callback_types": callback_types,
+                        "callback_states": [cb.state_dict() for cb in stateful_callbacks],
+                        "history": {
+                            field: getattr(m_obj, field) for field in history_fields
+                        },
+                        "rng_state": _capture_rng_state(loaders),
+                    }
+                    for cb in checkpoints:
+                        cb.on_epoch_end(self, epoch + 1, val_loss)
+
                 if self.should_stop:
-                    m_obj.stopped_early = True
                     break
 
             t1 = time.time()

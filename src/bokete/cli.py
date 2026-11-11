@@ -11,6 +11,7 @@ from pathlib import Path
 import shutil
 import sys
 
+from bokete import __version__
 from bokete.utils import Colours
 
 
@@ -35,19 +36,28 @@ def init_project(target_dir_name: str) -> None:
         )
         sys.exit(1)
 
-    shutil.copytree(example_dir, target_path)
+    template_files = (
+        ".gitignore", "main.py", "pyproject.toml", "configs/example.yaml",
+        "src/__init__.py", "src/models.py", "src/schema.py",
+    )
+    for filename in template_files:
+        destination = target_path / filename
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(example_dir / filename, destination)
 
     # Customize project name in pyproject.toml
     project_toml = target_path / "pyproject.toml"
     if project_toml.exists():
         content = project_toml.read_text(encoding="utf-8")
-        content = content.replace("bokete-starter", target_dir_name)
+        content = content.replace("bokete-starter", target_path.name)
+        content = content.replace('"bokete",', f'"bokete>={__version__}",')
+        content = content.replace('bokete = { path = "..", editable = true }', "")
         project_toml.write_text(content, encoding="utf-8")
 
     print(f"{Colours.BOLD_CYAN}[BOKeTE]{Colours.RESET} Initialized new experiment project in '{Colours.BRIGHT_CYAN}{target_dir_name}{Colours.RESET}'!")
     print("\nNext steps:")
     print(f"  cd {target_dir_name}")
-    print("  uv run main.py")
+    print("  uv run main.py --config example")
 
 
 def main() -> None:

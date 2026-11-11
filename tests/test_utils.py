@@ -129,7 +129,7 @@ class TestUtils(unittest.TestCase):
         self.assertEqual(resolved, Path("example/configs/example.yaml"))
 
         # 2. Short name / configs/ folder resolution via mocking
-        with patch.object(Path, "is_file", side_effect=lambda: True):
+        with patch.object(Path, "is_file", side_effect=[False, True]):
             res_short = resolve_config_path("example")
             self.assertEqual(res_short, Path("configs/example.yaml"))
 

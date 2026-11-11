@@ -39,8 +39,7 @@ def plot_loss_curves(
     metrics=None,
 ):
     """
-    Plot per-epoch training and validation loss and save a static PNG to `path`, 
-    along with a companion interactive HTML file.
+    Plot per-epoch training and validation loss and save a static PNG to `path`.
 
     Accepts either individual `train_loss` / `val_loss` lists or a `TrainingMetrics` / dict instance.
     """
@@ -93,12 +92,15 @@ def plot_multi_trial_loss_curves(
     """
     Plots multi-trial training and validation loss curves with mean and std shaded bands.
     """
-    train_losses = [m['train_loss'] for m in all_trial_metrics if isinstance(m, dict) and 'train_loss' in m and m['train_loss']]
-    val_losses = [m['val_loss'] for m in all_trial_metrics if isinstance(m, dict) and 'val_loss' in m and m['val_loss']]
+    paired_losses = [
+        (m['train_loss'], m['val_loss']) for m in all_trial_metrics
+        if isinstance(m, dict) and m.get('train_loss') and m.get('val_loss')
+    ]
 
-    if not train_losses or not val_losses:
+    if not paired_losses:
         logger.warning("Empty multi-trial loss lists passed to plot_multi_trial_loss_curves. Skipping plot.")
         return
+    train_losses, val_losses = zip(*paired_losses)
 
     min_epochs = min(min(len(t) for t in train_losses), min(len(v) for v in val_losses))
     epochs = np.arange(1, min_epochs + 1)

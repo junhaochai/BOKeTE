@@ -10,7 +10,6 @@ import copy
 from dataclasses import asdict, is_dataclass
 import itertools
 import logging
-import shutil
 import time
 from datetime import datetime
 from pathlib import Path
@@ -84,7 +83,7 @@ def _run_trials(
         duration_seconds = round(t1 - t0, 2)
 
         # Guard: Ensure output directory exists and metrics were produced before generating report
-        # (prevents errors on empty runs and enables partial reports for completed trials on KeyboardInterrupt)
+        # (prevents errors on empty runs)
         if output_dir and all_trial_metrics:
             logger.info("")
             reporting.config_report(
@@ -117,11 +116,6 @@ def _run_trials(
                 f"(Min: {utils.Colours.CYAN}{min_val:.4f}{utils.Colours.RESET}, Max: {utils.Colours.CYAN}{max_val:.4f}{utils.Colours.RESET})"
             )
             logger.info("")
-    except KeyboardInterrupt:
-        utils.close_file_loggers()
-        if not all_trial_metrics and output_dir and Path(output_dir).exists():
-            shutil.rmtree(output_dir, ignore_errors=True)
-        raise
     finally:
         utils.close_file_loggers()
 
@@ -196,7 +190,7 @@ def run_experiments(
                 utils.log_experiment_start(idx, total, exp_name, params_str=params_str)
 
                 param_folder_name = "_".join(folder_parts) if folder_parts else f"config_{idx}"
-                combo_dir = sweep_batch_dir / param_folder_name
+                combo_dir = sweep_batch_dir / f"{idx:03d}_{param_folder_name}"
                 combo_dir.mkdir(parents=True, exist_ok=True)
 
                 trial_metrics = _run_trials(
@@ -215,9 +209,6 @@ def run_experiments(
             utils.close_file_loggers()
             logger.warning("")
             logger.warning(f"[BOKeTE] Experiment sweep {utils.format_tag(exp_name)} aborted by user (Ctrl+C).")
-            # If no completed combinations exist in batch dir, clean up the empty folder
-            if sweep_batch_dir.exists() and not any(sweep_batch_dir.iterdir()):
-                shutil.rmtree(sweep_batch_dir, ignore_errors=True)
             return results
 
         sweep_t1 = time.time()
@@ -395,8 +386,7 @@ def create_trial_runner(
             return result
 
         except KeyboardInterrupt:
-            if trial_dir.exists():
-                shutil.rmtree(trial_dir, ignore_errors=True)
+            logger.warning("[BOKeTE] Trial interrupted; retaining files in %s", trial_dir)
             raise
 
     run_fn.model_factory = model_factory  # type: ignore[attr-defined]

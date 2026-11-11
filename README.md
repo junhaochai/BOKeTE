@@ -16,8 +16,8 @@ A minimal PyTorch training and experimentation helper library for my personal us
   <sub><em>"BOKeTE": Music video homage & namesake inspiration.</em></sub>
 </p>
 
-- **Training & Execution**: `Trainer` loop with mixed-precision (AMP), auto cuDNN benchmarking, `EarlyStopping`, and model/optimizer checkpointing.
-- **Experimentation & Reporting**: Metric tracking, loss curve rendering (Matplotlib + Chart.js HTML), grid search parameter sweeps, and GFM Markdown report compilation (single-trial + multi-trial summaries).
+- **Training & Execution**: `Trainer` loop with mixed-precision (AMP), auto cuDNN benchmarking, `EarlyStopping`, and full-state checkpoint resume.
+- **Experimentation & Reporting**: Metric tracking, Matplotlib loss curves, grid search parameter sweeps, and GFM Markdown report compilation (single-trial + multi-trial summaries).
 
 > [!NOTE]
 > **Personal Tooling & Permissions**: `bokete` is a personal PyTorch helper library made publicly visible for portfolio review and inspection. From `0.2.0` onwards, including `0.2.0.dev0`, reuse requires prior written permission from [Jun Hao Chai](https://github.com/junhaochai), except where applicable law, hosting-platform terms or existing licence grants permit otherwise. Earlier MIT-licensed versions and material retain their original permissions; their notices remain in the earlier releases and Git history. See [LICENSE](LICENSE) for current terms. The software is provided "as is", without warranty, guaranteed support or promises of backward compatibility.
@@ -32,6 +32,7 @@ A minimal PyTorch training and experimentation helper library for my personal us
   - [4.2 Multi-Trial Execution & Sweeps (`bokete.experiments`)](#42-multi-trial-execution--sweeps-boketeexperiments)
   - [4.3 Configuration & Directory Utilities (`bokete.utils`)](#43-configuration--directory-utilities-boketeutils)
   - [4.4 Validation Metric Selection](#44-validation-metric-selection)
+  - [4.5 Checkpoint Resume](#45-checkpoint-resume)
 - [5. Project Architecture](#5-project-architecture)
 - [6. Roadmap](#6-roadmap)
 
@@ -43,17 +44,18 @@ All core primitives are exported at the root package level (`from bokete import 
 
 | Function / Class | Module | Description |
 | :--- | :--- | :--- |
-| `load_config(config_path)` | `bokete.utils` | Loads a `.yaml`, `.yml`, or `.json` file into a dictionary with standardized logging. |
+| `load_config(config_path)` | `bokete.utils` | Loads a `.yaml` or `.yml` file into a dictionary with standardised logging. |
 | `resolve_config_path(path)` | `bokete.utils` | Resolves config paths inside `configs/` directory (auto-appending `.yaml` for short names). |
-| `set_seed(seed, deterministic=False)` | `bokete.training` | Seeds Python, NumPy, and PyTorch (CPU/CUDA) for reproducibility. |
-| `determine_device()` | `bokete.training` | Detects best available hardware device (`cuda`, `mps`, or `cpu`). |
+| `set_seed(seed, deterministic=False)` | `bokete.utils` | Seeds Python, NumPy, and PyTorch (CPU/CUDA) for reproducibility. |
+| `determine_device()` | `bokete.utils` | Detects best available hardware device (`cuda`, `mps`, or `cpu`). |
 | `Trainer(...)` | `bokete.training` | Main training loop wrapper with AMP mixed-precision, auto-cuDNN benchmarking & gradient clipping. |
 | `EarlyStopping(...)` | `bokete.training` | Callback signaling early stop when validation loss stalls. |
-| `Checkpoint(...)` | `bokete.training` | Callback saving `best.pt` and `last.pt` model weights + optimizer state. |
+| `Checkpoint(...)` | `bokete.training` | Callback saving `best.pt` and `last.pt`, including full training state when used with `Trainer.fit`. |
 | `training_report(metrics)` | `bokete.metrics` | Computes final losses, mean losses, and best epoch summary dict. |
-| `plot_loss_curves(...)` | `bokete.plotting` | Renders Matplotlib loss graph & interactive Chart.js HTML plot. |
-| `experiment_report(...)` | `bokete.reporting` | Generates a structured GFM Markdown trial report string with dynamic overview metadata. |
-| `multi_trial_report(...)` | `bokete.reporting` | Generates a combined GFM Markdown summary report string across multiple experiment trials. |
+| `plot_loss_curves(...)` | `bokete.plotting` | Renders a Matplotlib loss graph as a PNG. |
+| `trial_report(...)` | `bokete.reporting` | Generates a GFM Markdown report for a single training run. |
+| `config_report(...)` | `bokete.reporting` | Summarises multiple trials for one configuration. |
+| `experiment_report(...)` | `bokete.reporting` | Compares configurations from a parameter sweep. |
 | `log_trial_start(...)` | `bokete.utils` | Logs a standardized trial header with clean unformatted console spacing. |
 | `run_experiments(...)` | `bokete.experiments` | Primary top-level entry point for single-trial runs, multi-trial runs, and grid search sweeps. |
 
@@ -176,7 +178,7 @@ history = trainer.fit(
 )
 
 # 4. Generate & Save Markdown Report (Auto-embeds YAML table & loss curves!)
-bokete.experiment_report(
+bokete.trial_report(
     config=config,
     metrics=history,
     save_path="results/report.md",
@@ -205,7 +207,7 @@ To trigger an automated hyperparameter grid sweep, uncomment `param_grid` in [`e
 ## 4. Advanced Workflows & Feature Reference
 
 ### 4.1 Loss Curve Plotting (`bokete.plotting`)
-Renders publication-ready training and validation loss curves using Matplotlib with annotated best-epoch markers, alongside a companion interactive Chart.js HTML file. Accepts a `TrainingMetrics` instance directly or raw loss lists.
+Renders training and validation loss curves as PNG files using Matplotlib with annotated best-epoch markers. Accepts a `TrainingMetrics` instance directly or raw loss lists.
 
 ```python
 import bokete
@@ -284,7 +286,7 @@ results = bokete.run_experiments(config=config, run_fn=runner)
 ```
 
 ### 4.2 Loss Curve Plotting (`bokete.plotting`)
-Renders publication-ready training and validation loss curves using Matplotlib with annotated best-epoch markers, alongside a companion interactive Chart.js HTML file. Accepts a `TrainingMetrics` instance directly or raw loss lists.
+Renders training and validation loss curves as PNG files using Matplotlib with annotated best-epoch markers. Accepts a `TrainingMetrics` instance directly or raw loss lists.
 
 ```python
 import bokete
@@ -337,6 +339,62 @@ training:
 - A sweep must use the same monitor across configurations so its scores can be
   compared. A `ReduceLROnPlateau` scheduler must use `mode="max"` for accuracy
   or `mode="min"` for loss; it receives the monitored score.
+- Epoch losses pool batch totals: `mean` uses element counts for elementwise
+  losses and valid target counts or class-weight sums for cross-entropy/NLL;
+  `batchmean` uses sample counts, and `sum` remains a sum. Custom scalar criteria
+  are treated as per-sample means, using Tensor targets or outputs to infer
+  batch size; fully opaque structures retain one unit of weight per batch.
+  Ignored-only batches are skipped, and
+  validation with no valid observations is rejected for either monitor.
+  A mean-reduced training batch with zero total class weight is rejected
+  before the optimiser step because its mean loss is undefined.
+
+### 4.5 Checkpoint Resume
+
+Pass a checkpoint path to `Trainer.fit(resume_from=...)` to continue from a
+completed epoch. The default, `resume_from=None`, starts a fresh run.
+
+```python
+history = trainer.fit(
+    train_loader,
+    val_loader,
+    epochs=20,
+    scheduler=scheduler,
+    early_stopping=early_stopping,
+    checkpoint=bokete.Checkpoint("checkpoints"),
+    resume_from="checkpoints/last.pt",
+)
+```
+
+- `epochs` is the total target, including saved epochs. Resuming after 10
+  completed epochs with `epochs=20` runs epochs 11 through 20. A checkpoint at
+  or beyond the target performs no further training. A checkpoint whose early
+  stopping already fired remains stopped.
+- `last.pt` continues the latest saved epoch; `best.pt` continues the selected
+  best epoch, which may be earlier. Both contain model and optimiser state,
+  scheduler and AMP scaler state, best score, early-stopping policy and counter,
+  completed epoch, metric history and RNG state. Checkpoints are written after
+  the other epoch-end callbacks finish.
+- Construct the matching model, optimiser, scheduler and callbacks before
+  calling `fit`. Use the same monitored metric, AMP setting, stateful callback
+  types/order, loader generator configuration and number of visible CUDA
+  devices. Callbacks supplied through `callbacks` are also restored when they
+  provide `state_dict()` and `load_state_dict()`; their saved state must contain
+  tensors and plain Python values compatible with `weights_only=True` loading.
+- RNG restoration covers Python, NumPy's global generator, PyTorch CPU/CUDA
+  generators, and explicit training/validation DataLoader and sampler
+  generators. Independently owned RNG objects, custom sampler/dataset state,
+  persistent worker RNG state and distributed per-rank state are not captured.
+  Identical numerical results also require a matching runtime and deterministic
+  operations. Resume starts between epochs, rather than partway through a batch.
+- Returned histories include the saved epochs, so reports and plots retain
+  their original epoch numbering. Timing describes the current `fit` call.
+- Older checkpoints and standalone `Checkpoint.update()` saves remain usable
+  for loading weights, but lack the full state required by `resume_from`.
+- Each checkpoint file is written to a sibling temporary file and replaced
+  only after serialisation succeeds. `best.pt` and `last.pt` are independent
+  writes, so a save exception can leave them at different epochs; recovery
+  requires checking both files and choosing the intended checkpoint explicitly.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -353,7 +411,7 @@ bokete/
         ├── __init__.py    # Public API exports
         ├── experiments.py # Multi-trial execution & grid search parameter sweeps
         ├── metrics.py     # Loss aggregation & summary statistics
-        ├── plotting.py    # Matplotlib loss curve & Chart.js HTML rendering
+        ├── plotting.py    # Matplotlib loss curves saved as PNG files
         ├── reporting.py   # Single-trial & multi-trial Markdown report generation
         ├── training.py    # Core Trainer, EarlyStopping, Checkpoint, auto-benchmarking
         └── utils.py       # Configuration I/O, device checks, seeds & console formatters
@@ -369,11 +427,22 @@ bokete/
       selection, early stopping and reports use the same validation metric.
 - [x] Clarify report labels, such as validation accuracy at the selected
       epoch versus validation accuracy at the final epoch.
-- [ ] Support full-state checkpoint resume, including model, optimiser,
+- [x] Support full-state checkpoint resume, including model, optimiser,
       scheduler and AMP scaler state, best score, early-stopping counter,
       completed epoch and random-number generator state. Treat `epochs`
       as the total target: resuming after 10 completed epochs with
       `epochs=20` runs 10 more.
 - [x] Log and report collected metrics without another validation pass.
+- [x] Preserve existing output files, checkpoints and logs when a trial is interrupted.
+- [ ] Record interrupted trial status and retain partial results in returned summaries.
+- [ ] Support explicit per-trial resume paths through experiment configuration,
+      add a scheduler factory, and retain the original best checkpoint for
+      resumed reports when no new improvement occurs.
+- [x] Protect individual checkpoint writes with a temporary file and replacement step,
+      verifying that a failed save leaves the previous checkpoint loadable.
+- [x] Define and correct epoch loss aggregation for uneven batches, accounting
+      for loss reduction, ignored targets and class weights.
+- [ ] Respect deterministic settings throughout training, record runtime
+      versions in reports, and verify CUDA checkpoint resume on suitable hardware.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>

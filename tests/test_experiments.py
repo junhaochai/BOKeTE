@@ -199,7 +199,7 @@ class TestExperiments(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             res = run_experiments(config, num_trials=1, run_fn=runner, output_dir=tmpdir)
             self.assertEqual(res, [])
-            self.assertFalse(Path(tmpdir).exists())
+            self.assertTrue(Path(tmpdir).exists())
 
 
 if __name__ == "__main__":
