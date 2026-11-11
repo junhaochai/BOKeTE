@@ -33,8 +33,9 @@ A minimal PyTorch training and experimentation helper library for my personal us
   - [4.3 Configuration & Directory Utilities (`bokete.utils`)](#43-configuration--directory-utilities-boketeutils)
   - [4.4 Validation Metric Selection](#44-validation-metric-selection)
   - [4.5 Checkpoint Resume](#45-checkpoint-resume)
+  - [4.6 Interrupted Experiments](#46-interrupted-experiments)
+  - [4.7 Reproducibility & Runtime Records](#47-reproducibility--runtime-records)
 - [5. Project Architecture](#5-project-architecture)
-- [6. Roadmap](#6-roadmap)
 
 ---
 
@@ -207,6 +208,7 @@ To trigger an automated hyperparameter grid sweep, uncomment `param_grid` in [`e
 ## 4. Advanced Workflows & Feature Reference
 
 ### 4.1 Loss Curve Plotting (`bokete.plotting`)
+
 Renders training and validation loss curves as PNG files using Matplotlib with annotated best-epoch markers. Accepts a `TrainingMetrics` instance directly or raw loss lists.
 
 ```python
@@ -217,45 +219,37 @@ bokete.plot_loss_curves(metrics=history, path="results/graph.png")
 ```
 
 ### 4.2 Multi-Trial Execution & Sweeps (`bokete.experiments`)
-    save_path="results/report.md"
-)
-```
 
-### Option B: Recommended High-Level Runner (`bokete.run_experiments`)
+`bokete.run_experiments` is the primary top-level entry point. It automatically detects whether your config contains a `param_grid`.
+
+#### Building a Trial Runner
 
 ```python
 import bokete
+import torch
+from torch.utils.data import DataLoader, TensorDataset
 
 # 1. Define factory functions
 def model_factory(cfg):
-    return torch.nn.Linear(10, 1)
+    return torch.nn.Linear(10, 2)
 
 def loader_factory(cfg):
-    x, y = torch.randn(100, 10), torch.randn(100, 1)
+    x, y = torch.randn(100, 10), torch.randint(0, 2, (100,))
     ds = TensorDataset(x, y)
-    loader = DataLoader(ds, batch_size=cfg["batch_size"])
+    loader = DataLoader(ds, batch_size=cfg.get("training", {}).get("batch_size", 32))
     return loader, loader
 
 # 2. Build automated trial runner
 runner = bokete.create_trial_runner(model_factory, loader_factory)
 
 # 3. Load config and run experiment (auto-detects single config vs grid sweep)
-cfg = bokete.parse_cli_config(MyConfigSchema)
-bokete.run_experiments(config=cfg, run_fn=runner)
+config = bokete.load_config("configs/config.yaml")
+bokete.run_experiments(config=config, run_fn=runner)
 ```
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
----
-
-## 4. Feature Reference & Advanced API
-
-### 4.1 Orchestration & Sweeps (`bokete.run_experiments`)
-
-`bokete.run_experiments` is the primary top-level entry point. It automatically detects whether your config contains a `param_grid`:
-
 #### Single-Config Multi-Trial Run
-Runs a single configuration across multiple seed trials with clean console logging, graceful `Ctrl+C` cancellation, and auto-generation of `summary-report.md`:
+
+Runs a single configuration across multiple seed trials with clean console logging, graceful `Ctrl+C` cancellation, and auto-generation of `config-report.md`:
 
 ```python
 import bokete
@@ -268,6 +262,7 @@ all_trial_metrics = bokete.run_experiments(
 ```
 
 #### Grid Search Sweeps
+
 Executes parameter combinations across a configuration grid:
 
 ```python
@@ -285,23 +280,14 @@ config = {
 results = bokete.run_experiments(config=config, run_fn=runner)
 ```
 
-### 4.2 Loss Curve Plotting (`bokete.plotting`)
-Renders training and validation loss curves as PNG files using Matplotlib with annotated best-epoch markers. Accepts a `TrainingMetrics` instance directly or raw loss lists.
-
-```python
-import bokete
-
-# Pass the TrainingMetrics object directly!
-bokete.plot_loss_curves(metrics=history, path="results/graph.png")
-```
-
 ### 4.3 Configuration & Directory Utilities (`bokete.utils`)
+
 Provides configuration loading (`load_config`), experiment run directory creation (`create_run_directory`), and nested key dictionary utilities (`flatten_dict`, `set_nested_key`).
 
 ```python
 import bokete
 
-# 1. Load YAML or JSON configuration file into a dictionary
+# 1. Load a YAML configuration file into a dictionary
 config = bokete.load_config("configs/config.yaml")
 
 # 2. Programmatically override nested configuration keys using dot notation
@@ -396,6 +382,128 @@ history = trainer.fit(
   writes, so a save exception can leave them at different epochs; recovery
   requires checking both files and choosing the intended checkpoint explicitly.
 
+#### Resume Through the Experiment Runner
+
+Map each trial number to its own full-state checkpoint in the configuration:
+
+```yaml
+experiment_name: baseline_classification_v1
+trials: 3
+deterministic: false
+training:
+  epochs: 20
+  resume_from:
+    "1": "results/previous/trial_1/checkpoints/last.pt"
+    "2": "results/previous/trial_2/checkpoints/last.pt"
+  # Optional when best.pt was moved or renamed:
+  resume_best_from:
+    "2": "results/archive/trial_2-best.pt"
+```
+
+- Trial 2 resumes its own state; it does not continue from trial 1. Unlisted
+  trials start fresh. A completed trial can be listed with its checkpoint at
+  the target epoch to retain its history without training it again. Use the
+  same seed, dataset/model configuration and deterministic policy as before.
+- Paths are relative to the process working directory, or may be absolute.
+  Each resumed invocation normally creates a new output directory. It does
+  not discover old runs or skip completed trials automatically.
+- For a parameter sweep, use quoted `"configuration:trial"` keys instead,
+  for example `"2:1"` means the second parameter combination's first trial.
+  Both numbers start at 1 and follow the configured grid order. Keep that
+  order unchanged when resuming. Trial-only keys are rejected in sweeps to
+  prevent sharing one trial's checkpoint across different configurations.
+- The runner retains a matching original best checkpoint in the new trial's
+  checkpoint directory when saving is enabled. If `resume_best_from` is
+  omitted, it checks the resume checkpoint itself when it is the selected
+  epoch, otherwise its neighbouring `best.pt`. The candidate must match the
+  selected epoch, score and monitored metric in the saved history. Keep
+  checkpoint paths within the intended trial; matching scores alone do not
+  establish a file's provenance.
+- If no matching original best checkpoint is available and training makes
+  no new improvement, reports mark it unavailable and omit best-weight test
+  metrics. Final-weight metrics can still be evaluated. Explicit missing or
+  mismatched `resume_best_from` paths raise an error.
+
+Pass `scheduler_factory` to create one scheduler per trial, after constructing
+the optimiser and before restoring its state:
+
+```python
+def scheduler_factory(optimizer, config):
+    return torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
+
+runner = bokete.create_trial_runner(
+    model_factory,
+    loader_factory,
+    scheduler_factory=scheduler_factory,
+)
+```
+
+`step_size=5` reduces the learning rate every five epochs; `gamma=0.5`
+halves it at each reduction. Omitting the factory uses no scheduler. A
+`ReduceLROnPlateau` factory is an alternative for score-based scheduling;
+its mode must match the monitored metric (`min` for loss, `max` for accuracy).
+Supply a matching factory when resuming a run that used a scheduler.
+
+### 4.6 Interrupted Experiments
+
+- `run_experiments` stops on `Ctrl+C` and returns completed trials plus an
+  interrupted record for the current trial. Records include `trial`,
+  `status` (`completed` or `interrupted`), `interrupted` and `run_dir`.
+  Sweeps retain the current configuration and stop later configurations.
+- Partial histories contain complete training/validation epoch pairs. An
+  interruption before the first completed epoch produces an empty history
+  with interrupted status. Existing files and the last saved checkpoint are
+  retained; resuming replays work after that saved epoch boundary.
+- Reports show interrupted trials, but exclude them from aggregate scores,
+  mean loss curves and sweep rankings. No post-training test evaluation is
+  started after a training interruption.
+- Direct `Trainer.fit` and trial-runner calls still raise `KeyboardInterrupt`.
+  Catch `bokete.TrainingInterrupted` and read its `.history` to inspect the
+  retained `TrainingMetrics`. Custom runners that raise an ordinary
+  `KeyboardInterrupt` produce an interrupted record without partial history.
+
+### 4.7 Reproducibility & Runtime Records
+
+Set top-level `deterministic: true` in experiment configuration, or call
+`bokete.set_seed(42, deterministic=True)` before constructing CUDA objects.
+This enables PyTorch deterministic algorithms and deterministic cuDNN
+execution, disables cuDNN benchmarking, and supplies
+`CUBLAS_WORKSPACE_CONFIG=:4096:8` when no workspace setting already exists.
+The workspace value selects a cuBLAS workspace layout for repeatable CUDA
+matrix operations; an existing caller-provided value is preserved.
+Operations without a deterministic implementation raise an error rather
+than silently weakening the policy. See [PyTorch's deterministic algorithm
+documentation](https://docs.pytorch.org/docs/stable/generated/torch.use_deterministic_algorithms.html).
+
+`deterministic: false` (the default), or `set_seed(..., deterministic=False)`,
+explicitly disables deterministic algorithm restrictions and deterministic
+cuDNN execution again. Automatic cuDNN benchmarking is then allowed for
+consistent input shapes. Disabling leaves any cuBLAS workspace environment
+setting in place; it no longer enforces deterministic algorithms.
+These settings affect the whole process. Full-state resume requires the same
+recorded deterministic settings; older checkpoints without them cannot
+validate that policy. Matching hardware/software, data loading and operations
+are still necessary for identical results.
+
+Training histories record Python, BOKeTE, PyTorch, NumPy, CUDA and cuDNN
+versions plus deterministic settings and the final cuDNN benchmark setting.
+Reports display these recorded values, including distinct recorded
+environments across trials. Older histories display `Not recorded` instead
+of attributing the report writer's runtime to the original training run.
+For resumed training, the environment describes the current invocation.
+CUDA AMP checkpoint resume was verified on an NVIDIA GeForce RTX 3060 Laptop
+GPU using the example environment's PyTorch `2.6.0+cu124`. The regression test
+still skips when run with the root environment's CPU-only PyTorch build.
+
+To run the full suite in the CUDA-enabled example environment from the
+repository root, set the cuBLAS workspace before Python starts. Earlier
+tests can initialise CUDA before later tests enable deterministic execution:
+
+```powershell
+$env:CUBLAS_WORKSPACE_CONFIG = ":4096:8"
+.\example\.venv\Scripts\python.exe -m unittest discover -s tests -q
+```
+
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 ---
@@ -416,33 +524,5 @@ bokete/
         ├── training.py    # Core Trainer, EarlyStopping, Checkpoint, auto-benchmarking
         └── utils.py       # Configuration I/O, device checks, seeds & console formatters
 ```
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
----
-
-## 6. Roadmap
-
-- [x] Standardise metric names and monitoring direction so checkpoint
-      selection, early stopping and reports use the same validation metric.
-- [x] Clarify report labels, such as validation accuracy at the selected
-      epoch versus validation accuracy at the final epoch.
-- [x] Support full-state checkpoint resume, including model, optimiser,
-      scheduler and AMP scaler state, best score, early-stopping counter,
-      completed epoch and random-number generator state. Treat `epochs`
-      as the total target: resuming after 10 completed epochs with
-      `epochs=20` runs 10 more.
-- [x] Log and report collected metrics without another validation pass.
-- [x] Preserve existing output files, checkpoints and logs when a trial is interrupted.
-- [ ] Record interrupted trial status and retain partial results in returned summaries.
-- [ ] Support explicit per-trial resume paths through experiment configuration,
-      add a scheduler factory, and retain the original best checkpoint for
-      resumed reports when no new improvement occurs.
-- [x] Protect individual checkpoint writes with a temporary file and replacement step,
-      verifying that a failed save leaves the previous checkpoint loadable.
-- [x] Define and correct epoch loss aggregation for uneven batches, accounting
-      for loss reduction, ignored targets and class weights.
-- [ ] Respect deterministic settings throughout training, record runtime
-      versions in reports, and verify CUDA checkpoint resume on suitable hardware.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>

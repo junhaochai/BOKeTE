@@ -24,6 +24,34 @@ import bokete.utils as utils
 logger = logging.getLogger(__name__)
 
 
+def _extra_metric_keys(histories):
+    """Collect extra-metric columns in first-seen order, including text values."""
+    keys = []
+    for history in histories:
+        if isinstance(history, dict) and isinstance(history.get("extra_metrics"), dict):
+            for key in history["extra_metrics"]:
+                if key not in keys:
+                    keys.append(key)
+    return keys
+
+
+def _extra_metric_stats(histories, keys):
+    """Calculate mean/std for numeric values in the requested metric columns."""
+    stats = {}
+    for key in keys:
+        values = []
+        for history in histories:
+            extra = history.get("extra_metrics", {}) if isinstance(history, dict) else {}
+            if key in extra:
+                try:
+                    values.append(float(extra[key]))
+                except (ValueError, TypeError):
+                    pass
+        if values:
+            stats[key] = (float(np.mean(values)), float(np.std(values)))
+    return stats
+
+
 
 def _write_report(out_file: Optional[Path], report_md: str) -> None:
     """Writes report string to out_file and logs completion."""
@@ -31,6 +59,23 @@ def _write_report(out_file: Optional[Path], report_md: str) -> None:
         out_file.parent.mkdir(parents=True, exist_ok=True)
         out_file.write_text(report_md, encoding="utf-8")
         logger.info(f"[BOKeTE] Saved Report to: {out_file}")
+
+
+def _runtime_section(histories):
+    """Display recorded environments; never substitute the report writer's runtime."""
+    environments = []
+    for history in histories:
+        runtime = history.get("runtime")
+        if runtime and runtime not in environments:
+            environments.append(runtime)
+    if not environments:
+        return "\n## Runtime Environment\nNot recorded.\n"
+    sections = []
+    for index, runtime in enumerate(environments, 1):
+        rows = "\n".join(f"| `{key}` | `{value}` |" for key, value in utils.flatten_dict(runtime).items())
+        label = f"\n### Environment {index}\n" if len(environments) > 1 else ""
+        sections.append(f"{label}\n| Setting | Recorded Value |\n| :--- | :--- |\n{rows}\n")
+    return "\n## Runtime Environment\n" + "".join(sections)
 
 
 def _resolve_device_string(
@@ -59,10 +104,8 @@ def _extract_model_info(model: Any) -> tuple[str, int, int, str]:
     """Extracts (model_name, total_params, trainable_params, structure_str) from a model object or dict."""
     # Active PyTorch model instance (nn.Module, DataParallel, or DDP)
     if hasattr(model, "parameters"):
-        raw_model = getattr(model, "module", model)
-        total_params = sum(p.numel() for p in raw_model.parameters())
-        trainable_params = sum(p.numel() for p in raw_model.parameters() if p.requires_grad)
-        return raw_model.__class__.__name__, total_params, trainable_params, str(raw_model)
+        info = utils._model_info(model)
+        return info["model_name"], info["total_params"], info["trainable_params"], info["structure"]
 
     # Loaded PyTorch checkpoint or model metadata dictionary
     if isinstance(model, dict):
@@ -136,7 +179,7 @@ def trial_report(
         selection = metrics_mod.selection_summary(m, configured_monitor)
         m = {**m, **selection}
         if metrics_summary is None:
-            metrics_summary = metrics_mod.training_report(m)
+            metrics_summary = metrics_mod.training_report(m) if m.get('train_loss') else dict(m)
         else:
             metrics_mod.selection_summary(metrics_summary, selection['monitor'])
             metrics_summary = {**metrics_summary, **selection}
@@ -145,7 +188,7 @@ def trial_report(
         if val_loss is None:
             val_loss = m.get('val_loss', [])
 
-        if auto_plot and graph_filename:
+        if auto_plot and graph_filename and m.get('train_loss') and m.get('val_loss'):
             graph_path = (out_file.parent / graph_filename) if out_file else Path(graph_filename)
             plotting.plot_loss_curves(metrics=m, best_epoch=selection['best_epoch'], path=graph_path,
                                       title=title or "Training and Validation Loss")
@@ -167,6 +210,11 @@ def trial_report(
 
     # Build Trial Overview dynamically
     overview_bullets = []
+    recorded = m if metrics is not None else metrics_summary
+    status = "interrupted" if recorded.get("interrupted") else "completed"
+    overview_bullets.append(f"- **Status:** `{status}`")
+    if recorded.get("best_checkpoint_available") is False:
+        overview_bullets.append("- **Best Checkpoint:** unavailable; best-weight test metrics were not evaluated.")
 
     # 1. Experiment Name
     if exp_name and exp_name != config_dict.get('dataset'):
@@ -260,6 +308,9 @@ def trial_report(
         f"| {epoch + 1} | {t:.4f} | {v:.4f} |" + (f" {accuracy[epoch]:.4f} |" if accuracy else "")
         for epoch, (t, v) in enumerate(zip(train_loss, val_loss))
     ])
+    loss_graph = (f"\n## Loss Curves\n![Loss Curve](./{graph_filename})\n"
+                  if graph_filename and train_loss and val_loss else "")
+    runtime_section = _runtime_section([recorded])
 
     report_md = f"""# {header_title}
 
@@ -274,8 +325,8 @@ def trial_report(
 | Mean Train Loss | `{metrics_summary.get('mean_train_loss', 'N/A')}` |
 | Mean Validation Loss | `{metrics_summary.get('mean_val_loss', 'N/A')}` |{extra_rows}
 
-## Loss Curves
-![Loss Curve](./{graph_filename})
+{loss_graph}
+{runtime_section}
 
 ## Hyperparameters & Configuration
 | Parameter | Value |
@@ -314,55 +365,47 @@ def config_report(
     mode = metrics_mod.monitor_mode(monitor)
     metric_label = utils.format_metric_name(monitor)
     selections = [metrics_mod.selection_summary(m, monitor) for m in all_trial_metrics]
+    completed_metrics = [m for m in all_trial_metrics if not m.get("interrupted")]
 
-    if auto_plot and graph_filename and out_file and all_trial_metrics:
+    if auto_plot and graph_filename and out_file and completed_metrics:
         graph_path = out_file.parent / graph_filename
         plotting.plot_multi_trial_loss_curves(
-            all_trial_metrics=all_trial_metrics,
+            all_trial_metrics=completed_metrics,
             path=graph_path,
             title="Multi-Trial Training & Validation Loss (Mean ± Std)",
         )
 
-    scored_trials = [(idx, s['best_score']) for idx, s in enumerate(selections, 1) if s['best_score'] is not None]
+    scored_trials = [(all_trial_metrics[idx - 1].get('trial', idx), s['best_score'])
+                     for idx, s in enumerate(selections, 1)
+                     if s['best_score'] is not None and not all_trial_metrics[idx - 1].get('interrupted')]
     best_val_losses = [score for _, score in scored_trials]
-    if not best_val_losses:
-        report_md = "# Configuration Report\n\nNo trial metrics recorded."
-        _write_report(out_file, report_md)
-        return report_md
-
-    mean_val = float(np.mean(best_val_losses))
-    std_val = float(np.std(best_val_losses))
-    min_val = float(np.min(best_val_losses))
-    max_val = float(np.max(best_val_losses))
-    best_index = int(np.argmin(best_val_losses) if mode == 'min' else np.argmax(best_val_losses))
-    best_trial_idx = scored_trials[best_index][0]
-    best_value = best_val_losses[best_index]
+    if best_val_losses:
+        mean_val = float(np.mean(best_val_losses))
+        std_val = float(np.std(best_val_losses))
+        min_val = float(np.min(best_val_losses))
+        max_val = float(np.max(best_val_losses))
+        best_index = int(np.argmin(best_val_losses) if mode == 'min' else np.argmax(best_val_losses))
+        best_trial_idx = scored_trials[best_index][0]
+        best_value = best_val_losses[best_index]
+        aggregate_scores = (
+            f"- **Mean Best {metric_label}:** `{mean_val:.4f} ± {std_val:.4f}`\n"
+            f"- **Best Trial {metric_label}:** `{best_value:.4f}` (Trial {best_trial_idx})\n"
+            f"- **Lowest Selected {metric_label}:** `{min_val:.4f}`\n"
+            f"- **Highest Selected {metric_label}:** `{max_val:.4f}`\n"
+        )
+    else:
+        aggregate_scores = "No completed trial scores recorded.\n"
 
     # Extract unique extra_metrics keys across all trials
-    extra_keys: List[str] = []
-    for m in all_trial_metrics:
-        if isinstance(m, dict) and 'extra_metrics' in m and isinstance(m['extra_metrics'], dict):
-            for k in m['extra_metrics'].keys():
-                if k not in extra_keys:
-                    extra_keys.append(k)
+    extra_keys = _extra_metric_keys(all_trial_metrics)
+    extra_stats = _extra_metric_stats(completed_metrics, extra_keys)
 
     extra_summary_lines = []
-    for k in extra_keys:
-        num_vals = []
-        for m in all_trial_metrics:
-            em = m.get('extra_metrics', {}) if isinstance(m, dict) else {}
-            if k in em:
-                try:
-                    num_vals.append(float(em[k]))
-                except (ValueError, TypeError):
-                    pass
-        if num_vals:
-            m_val = float(np.mean(num_vals))
-            s_val = float(np.std(num_vals))
-            fmt_k = utils.format_metric_name(k)
-            # Prevent duplicate prefix if metric is already aggregated (e.g. 'Mean Accuracy')
-            label = fmt_k if fmt_k.lower().startswith(("mean ", "average ")) else f"Mean {fmt_k}"
-            extra_summary_lines.append(f"- **{label}:** `{m_val:.4f} ± {s_val:.4f}`\n")
+    for k, (m_val, s_val) in extra_stats.items():
+        fmt_k = utils.format_metric_name(k)
+        # Prevent duplicate prefix if metric is already aggregated (e.g. 'Mean Accuracy')
+        label = fmt_k if fmt_k.lower().startswith(("mean ", "average ")) else f"Mean {fmt_k}"
+        extra_summary_lines.append(f"- **{label}:** `{m_val:.4f} ± {s_val:.4f}`\n")
 
     extra_summary_str = "".join(extra_summary_lines)
 
@@ -376,11 +419,12 @@ def config_report(
         f_tr = t_loss[-1] if t_loss else 'N/A'
         f_vl = v_loss[-1] if v_loss else 'N/A'
 
-        row_cells = [f"| Trial {idx}", f"`{b_ep}`", f"`{b_val}`", f"`{f_tr}`", f"`{f_vl}`"]
+        row_cells = [f"| Trial {m.get('trial', idx)}", f"`{b_ep}`", f"`{b_val}`", f"`{f_tr}`", f"`{f_vl}`"]
         if extra_keys:
             em = m.get('extra_metrics', {}) if isinstance(m, dict) else {}
             for ek in extra_keys:
                 row_cells.append(f"`{em.get(ek, 'N/A')}`")
+        row_cells.append(f"`{'interrupted' if m.get('interrupted') else 'completed'}`")
         trial_rows.append(" | ".join(row_cells) + " |")
 
     trial_table_header = f"| Trial | Selected Epoch | Selected {metric_label} | Final Train Loss | Final Validation Loss |"
@@ -389,6 +433,8 @@ def config_report(
         formatted_extra_headers = [utils.format_metric_name(ek) for ek in extra_keys]
         trial_table_header += " " + " | ".join(formatted_extra_headers) + " |"
         trial_table_align += " " + " | ".join([":---:"] * len(extra_keys)) + " |"
+    trial_table_header += " Status |"
+    trial_table_align += " :---: |"
 
     trial_table = f"{trial_table_header}\n{trial_table_align}\n" + "\n".join(trial_rows)
 
@@ -408,21 +454,23 @@ def config_report(
     model_line = f"{model_bullet}\n" if model_bullet else ""
 
     loss_graph_section = ""
-    if auto_plot and graph_filename:
+    if auto_plot and graph_filename and any(m.get('train_loss') and m.get('val_loss') for m in completed_metrics):
         loss_graph_section = f"\n## Multi-Trial Loss Curves\n![Multi-Trial Loss Curve](./{graph_filename})\n"
 
+    runtime_section = _runtime_section(all_trial_metrics)
+    status = "interrupted" if any(m.get('interrupted') for m in all_trial_metrics) else "completed"
     report_md = f"""# {header_title}
 
 ## Aggregate Performance ({len(all_trial_metrics)} Trials)
 {exp_bullet}{start_line}{end_line}{dur_line}{dev_line}{model_line}- **Selection Metric:** `{monitor}` ({'minimise' if mode == 'min' else 'maximise'})
-- **Mean Best {metric_label}:** `{mean_val:.4f} ± {std_val:.4f}`
-- **Best Trial {metric_label}:** `{best_value:.4f}` (Trial {best_trial_idx})
-- **Lowest Selected {metric_label}:** `{min_val:.4f}`
-- **Highest Selected {metric_label}:** `{max_val:.4f}`
+- **Status:** `{status}`
+- **Completed Trials:** `{len(completed_metrics)}`; interrupted trials are excluded from aggregates.
+{aggregate_scores}
 {extra_summary_str}{model_section}
 ## Per-Trial Performance Breakdown
 {trial_table}
 {loss_graph_section}
+{runtime_section}
 ## Experiment Configuration
 | Parameter | Value |
 | :--- | :--- |
@@ -461,18 +509,14 @@ def experiment_report(
 
     # Extract aggregated statistics per combo
     processed_combos = []
-    all_extra_keys: List[str] = []
-    for res in sweep_results:
-        metrics_list = res.get("metrics", [])
-        for m in metrics_list:
-            if isinstance(m, dict) and "extra_metrics" in m and isinstance(m["extra_metrics"], dict):
-                for k in m["extra_metrics"].keys():
-                    if k not in all_extra_keys:
-                        all_extra_keys.append(k)
+    all_extra_keys = _extra_metric_keys(
+        history for result in sweep_results for history in result.get("metrics", [])
+    )
 
     for idx, res in enumerate(sweep_results, 1):
         params = res.get("parameters", {})
-        metrics_list = res.get("metrics", [])
+        all_metrics = res.get("metrics", [])
+        metrics_list = [m for m in all_metrics if not m.get("interrupted")]
         run_dir = res.get("run_dir")
 
         selections = [metrics_mod.selection_summary(m, monitor) for m in metrics_list]
@@ -486,18 +530,7 @@ def experiment_report(
         final_val_losses = [m['val_loss'][-1] for m in metrics_list if m and 'val_loss' in m and m['val_loss']]
         mean_final_val = float(np.mean(final_val_losses)) if final_val_losses else None
 
-        extra_stats = {}
-        for ek in all_extra_keys:
-            num_vals = []
-            for m in metrics_list:
-                em = m.get('extra_metrics', {}) if isinstance(m, dict) else {}
-                if ek in em:
-                    try:
-                        num_vals.append(float(em[ek]))
-                    except (ValueError, TypeError):
-                        pass
-            if num_vals:
-                extra_stats[ek] = (float(np.mean(num_vals)), float(np.std(num_vals)))
+        extra_stats = _extra_metric_stats(metrics_list, all_extra_keys)
 
         param_desc = ", ".join([f"`{k}={v}`" for k, v in params.items()]) or f"Config #{idx}"
 
@@ -512,6 +545,8 @@ def experiment_report(
             "extra_stats": extra_stats,
             "run_dir": run_dir,
             "num_trials": len(metrics_list),
+            "interrupted_trials": sum(bool(m.get('interrupted')) for m in all_metrics),
+            "status": res.get("status", "interrupted" if any(m.get('interrupted') for m in all_metrics) else "completed"),
         })
 
     sorted_combos = sorted(
@@ -529,12 +564,12 @@ def experiment_report(
         table_headers.append(header_name)
         table_aligns.append(":---:")
 
-    table_headers.extend(["Mean Final Train Loss", "Mean Final Val Loss", "Trials"])
-    table_aligns.extend([":---:", ":---:", ":---:"])
+    table_headers.extend(["Mean Final Train Loss", "Mean Final Val Loss", "Completed Trials", "Interrupted Trials", "Status"])
+    table_aligns.extend([":---:", ":---:", ":---:", ":---:", ":---:"])
 
     rows = []
     for rank_idx, combo in enumerate(sorted_combos, 1):
-        rank_badge = str(rank_idx)
+        rank_badge = str(rank_idx) if combo['mean_best_val'] is not None else 'N/A'
         val_str = f"`{combo['mean_best_val']:.4f} ± {combo['std_best_val']:.4f}`" if combo['mean_best_val'] is not None else "`N/A`"
         tr_str = f"`{combo['mean_final_train']:.4f}`" if combo['mean_final_train'] is not None else "`N/A`"
         fv_str = f"`{combo['mean_final_val']:.4f}`" if combo['mean_final_val'] is not None else "`N/A`"
@@ -547,7 +582,7 @@ def experiment_report(
             else:
                 cells.append("`N/A`")
 
-        cells.extend([tr_str, fv_str, f"`{combo['num_trials']}`"])
+        cells.extend([tr_str, fv_str, f"`{combo['num_trials']}`", f"`{combo['interrupted_trials']}`", f"`{combo['status']}`"])
         rows.append("| " + " | ".join(cells) + " |")
 
     leaderboard_table = f"| {' | '.join(table_headers)} |\n| {' | '.join(table_aligns)} |\n" + "\n".join(rows)
@@ -577,12 +612,17 @@ def experiment_report(
     dev_str = _resolve_device_string(config_dict)
     dev_line = f"- **Execution Device:** `{dev_str}`\n"
     total_configs = len(sweep_results)
+    histories = [m for result in sweep_results for m in result.get('metrics', [])]
+    runtime_section = _runtime_section(histories)
+    status = "interrupted" if any(c['status'] == 'interrupted' for c in processed_combos) else "completed"
 
     report_md = f"""# {header_title}
 
 ## Study Overview
 {exp_bullet}{start_line}{end_line}{dur_line}{dev_line}- **Configurations Tested:** `{total_configs}`
 - **Total Executions:** `{sum(c['num_trials'] for c in processed_combos)}` trials
+- **Status:** `{status}`
+- **Interrupted Trials:** `{sum(c['interrupted_trials'] for c in processed_combos)}` (excluded from rankings)
 - **Selection Metric:** `{monitor}` ({'minimise' if mode == 'min' else 'maximise'})
 
 ## Optimal Configuration
@@ -590,6 +630,7 @@ def experiment_report(
 
 ## Comparative Leaderboard
 {leaderboard_table}
+{runtime_section}
 
 ## Base Experiment Configuration
 | Parameter | Value |

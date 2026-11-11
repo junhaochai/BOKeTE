@@ -175,7 +175,8 @@ class TestExperimentRegressions(unittest.TestCase):
                 result = run_experiments({"experiment_name": "interrupted"},
                                          run_fn=lambda *args, **kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
                                          output_dir=tmpdir)
-            self.assertEqual(result, [])
+            self.assertEqual(len(result), 1)
+            self.assertTrue(result[0]["interrupted"])
             self.assertTrue(path.exists())
             self.assertEqual(path.read_text(encoding="utf-8"), "keep this")
 

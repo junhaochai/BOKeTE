@@ -76,7 +76,7 @@ class TestCheckpointResume(unittest.TestCase):
             }
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            set_seed(42)
+            set_seed(42, deterministic=device == "cuda")
             np.random.normal()  # Leave a cached Gaussian in NumPy's state.
             full, full_scheduler, full_stopper, train, val = components()
             expected = full.fit(train, val, epochs=4, scheduler=full_scheduler,
@@ -84,7 +84,7 @@ class TestCheckpointResume(unittest.TestCase):
                                 checkpoint=Checkpoint(Path(tmpdir) / "full"), progress=False)
             expected_random = next_random_values()
 
-            set_seed(42)
+            set_seed(42, deterministic=device == "cuda")
             np.random.normal()
             first, scheduler, stopper, train, val = components()
             split_dir = Path(tmpdir) / "split"
@@ -96,7 +96,7 @@ class TestCheckpointResume(unittest.TestCase):
             self.assertEqual(saved["epoch"], 2)
 
             # Reconstruction consumes random numbers; resume must undo that drift.
-            set_seed(99)
+            set_seed(99, deterministic=device == "cuda")
             resumed, scheduler, stopper, train, val = components()
             actual = resumed.fit(train, val, epochs=4, scheduler=scheduler,
                                  early_stopping=stopper, checkpoint=Checkpoint(split_dir),

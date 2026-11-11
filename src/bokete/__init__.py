@@ -8,6 +8,7 @@ from bokete.training import (
     Checkpoint,
     EarlyStopping,
     Trainer,
+    TrainingInterrupted,
     evaluate,
 )
 from bokete.utils import (
@@ -56,6 +57,7 @@ __all__ = [
     "Checkpoint",
     "EarlyStopping",
     "TrainingMetrics",
+    "TrainingInterrupted",
     "close_file_loggers",
     "config_report",
     "create_run_directory",

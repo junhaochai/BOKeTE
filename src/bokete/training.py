@@ -33,6 +33,14 @@ import bokete.utils as utils
 logger = logging.getLogger(__name__)
 
 
+class TrainingInterrupted(KeyboardInterrupt):
+    """Carry completed epoch history while preserving KeyboardInterrupt semantics."""
+
+    def __init__(self, history):
+        super().__init__("Training interrupted")
+        self.history = history
+
+
 def _atomic_save(state, destination):
     with tempfile.NamedTemporaryFile(
         dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp", delete=False,
@@ -77,6 +85,16 @@ def _loss_weight(criterion, outputs, targets):
         return math.prod(torch.broadcast_shapes(outputs.shape, targets.shape))
     # Custom scalar criteria are assumed to return a per-sample mean.
     return targets.shape[0] if targets.ndim else 1
+
+
+def _loss_contribution(value, weight, reduction):
+    """Convert a batch scalar to its contribution to the epoch total."""
+    return value if reduction == "sum" else value * weight
+
+
+def _epoch_loss(total, weight, reduction):
+    """Finalise a loss total once the caller has checked its denominator."""
+    return total if reduction == "sum" else total / weight
 
 
 def _loader_generators(loaders):
@@ -287,7 +305,7 @@ def evaluate(model, loader, criterion, device=None, prepare_batch=None, amp_acti
                     )
                 else:
                     batch_loss = criterion(outputs, targets).item()
-                    batch_total = batch_loss if getattr(criterion, "reduction", "mean") == "sum" else batch_loss * weight
+                    batch_total = _loss_contribution(batch_loss, weight, getattr(criterion, "reduction", "mean"))
             running_loss += batch_total
             total_weight += weight
             if collect_accuracy:
@@ -301,7 +319,7 @@ def evaluate(model, loader, criterion, device=None, prepare_batch=None, amp_acti
 
     if total_weight == 0:
         raise ValueError("Cannot evaluate an empty loader or with no valid targets.")
-    loss = running_loss if getattr(criterion, "reduction", "mean") == "sum" else running_loss / total_weight
+    loss = _epoch_loss(running_loss, total_weight, getattr(criterion, "reduction", "mean"))
     if collect_accuracy:
         if total == 0:
             raise ValueError("Cannot monitor validation accuracy on an empty loader or with no valid targets.")
@@ -383,6 +401,10 @@ class Trainer:
     ) -> float:
         """Run one training epoch over `train_loader` and return the mean training loss."""
         self.model.train()
+        deterministic = (torch.are_deterministic_algorithms_enabled()
+                         or torch.backends.cudnn.deterministic)
+        if deterministic:
+            torch.backends.cudnn.benchmark = False
         running_loss = 0.0
         total_weight = 0.0
         batches_run = 0
@@ -410,7 +432,7 @@ class Trainer:
                 continue
 
             # Auto-detect spatial shape consistency for cuDNN benchmarking
-            if self.device.type == 'cuda' and not self._variable_shapes_detected:
+            if self.device.type == 'cuda' and not deterministic and not self._variable_shapes_detected:
                 spatial_shape = tuple(inputs.shape[1:])
                 if self._last_spatial_shape is None:
                     self._last_spatial_shape = spatial_shape
@@ -438,10 +460,10 @@ class Trainer:
             self.scaler.update()
 
             loss_val = loss.item()
-            running_loss += loss_val if getattr(self.criterion, "reduction", "mean") == "sum" else loss_val * weight
+            running_loss += _loss_contribution(loss_val, weight, getattr(self.criterion, "reduction", "mean"))
             total_weight += weight
             batches_run += 1
-            avg_loss = running_loss if getattr(self.criterion, "reduction", "mean") == "sum" else running_loss / total_weight
+            avg_loss = _epoch_loss(running_loss, total_weight, getattr(self.criterion, "reduction", "mean"))
             batch_pbar.set_postfix(loss=f"{avg_loss:.4f}", refresh=False)
 
         if total_weight == 0:
@@ -481,7 +503,7 @@ class Trainer:
         """
         self.mode = metrics.monitor_mode(monitor)
         self.monitor = monitor
-        m_obj = metrics.TrainingMetrics(monitor=monitor)
+        m_obj = metrics.TrainingMetrics(monitor=monitor, runtime=utils.runtime_metadata())
         start_dt = datetime.now()
         start_time_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
         m_obj.start_time = start_time_str
@@ -542,6 +564,13 @@ class Trainer:
                 raise ValueError("Resume requires the same monitored metric.")
             if state["amp_active"] != self.amp_active:
                 raise ValueError("Resume requires the same AMP configuration.")
+            if "deterministic" in state:
+                settings = ("algorithms", "warn_only", "cudnn")
+                if self.device.type == "cuda" and state["deterministic"]["algorithms"]:
+                    settings += ("cublas_workspace_config",)
+                current_settings = utils._deterministic_settings()
+                if any(state["deterministic"][key] != current_settings[key] for key in settings):
+                    raise ValueError("Resume requires the same deterministic settings.")
             if state["callback_types"] != callback_types:
                 raise ValueError("Resume requires matching stateful callback types and order.")
             if len(state["callback_states"]) != len(stateful_callbacks):
@@ -574,15 +603,15 @@ class Trainer:
                     total_epochs=epochs,
                     show_progress=progress,
                 )
-                m_obj.train_loss.append(train_loss)
-
                 if monitor == "val_accuracy":
                     self.current_metrics = self.evaluate(val_loader, collect_accuracy=True)
-                    m_obj.val_accuracy.append(self.current_metrics["val_accuracy"])
                 else:
                     self.current_metrics = {"val_loss": self.evaluate(val_loader)}
                 val_loss = self.current_metrics["val_loss"]
+                m_obj.train_loss.append(train_loss)
                 m_obj.val_loss.append(val_loss)
+                if monitor == "val_accuracy":
+                    m_obj.val_accuracy.append(self.current_metrics["val_accuracy"])
 
                 score = self.current_metrics[monitor]
                 is_best = metrics.is_improvement(score, m_obj.best_score, self.mode)
@@ -629,6 +658,7 @@ class Trainer:
                     self._checkpoint_state = {
                         "version": 1,
                         "amp_active": self.amp_active,
+                        "deterministic": utils._deterministic_settings(),
                         "scaler_state_dict": self.scaler.state_dict(),
                         "callback_types": callback_types,
                         "callback_states": [cb.state_dict() for cb in stateful_callbacks],
@@ -649,6 +679,7 @@ class Trainer:
             elapsed = round(t1 - t0, 2)
             m_obj.end_time = end_time_str
             m_obj.duration_seconds = elapsed
+            m_obj.runtime = utils.runtime_metadata()
 
             logger.info("")
             logger.info(
@@ -663,6 +694,18 @@ class Trainer:
             logger.warning("")
             logger.warning("[BOKeTE] Training loop interrupted by user (KeyboardInterrupt). Aborting remaining epochs...")
             m_obj.interrupted = True
-            raise
+            m_obj.runtime = utils.runtime_metadata()
+            # A signal between list appends must not expose half an epoch.
+            completed = min(len(m_obj.train_loss), len(m_obj.val_loss))
+            if monitor == "val_accuracy":
+                completed = min(completed, len(m_obj.val_accuracy))
+            del m_obj.train_loss[completed:]
+            del m_obj.val_loss[completed:]
+            del m_obj.val_accuracy[completed:]
+            selection = metrics.selection_summary(m_obj.as_dict())
+            m_obj.best_epoch = selection["best_epoch"]
+            m_obj.best_score = selection["best_score"]
+            m_obj.best_val_loss = min(m_obj.val_loss) if m_obj.val_loss else None
+            raise TrainingInterrupted(m_obj) from None
 
         return m_obj

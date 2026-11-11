@@ -23,12 +23,15 @@ class TrainingConfig:
     patience: Optional[int] = 3
     save_checkpoints: bool = True
     monitor: str = "val_accuracy"
+    resume_from: Dict[str, str] = field(default_factory=dict)
+    resume_best_from: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
 class ExperimentConfig:
     experiment_name: str = "mnist_mlp_demo"
     seed: int = 42
+    deterministic: bool = False
     trials: int = 3
     param_grid: Optional[Dict[str, List[Any]]] = None
     data: DataConfig = field(default_factory=DataConfig)

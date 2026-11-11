@@ -32,6 +32,7 @@ class TrainingMetrics:
     val_accuracy: list[float] = field(default_factory=list)
     monitor: str = "val_loss"
     best_score: Optional[float] = None
+    runtime: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def epochs_run(self) -> int:
@@ -107,6 +108,8 @@ def training_report(metrics: Union[TrainingMetrics, Dict[str, Any]]) -> Dict[str
         'duration_seconds': duration_seconds,
         'duration_formatted': utils.format_duration(duration_seconds),
         'device_name': device_name,
+        'runtime': m.get('runtime', {}),
+        'interrupted': m.get('interrupted', False),
     }
 
     summary.update(selection_summary(m))

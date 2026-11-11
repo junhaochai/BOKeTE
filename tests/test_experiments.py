@@ -4,6 +4,7 @@ Unit tests for bokete experiment orchestration (run_experiments, run_trials, cre
 
 import tempfile
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,6 +17,32 @@ from bokete.metrics import TrainingMetrics
 
 
 class TestExperiments(unittest.TestCase):
+
+    def test_dataclass_config_preserved_for_custom_runner_and_normalised_for_sweep(self):
+        @dataclass
+        class Config:
+            experiment_name: str = "typed_runner"
+            trials: int = 2
+
+        config = Config()
+        for sweep in (False, True):
+            with self.subTest(sweep=sweep), tempfile.TemporaryDirectory() as tmpdir:
+                received_trials = []
+
+                def runner(trial_num, run_config, **kwargs):
+                    received_trials.append(trial_num)
+                    if sweep:
+                        self.assertIsInstance(run_config, dict)
+                        self.assertEqual(run_config["training"]["lr"], 0.1)
+                    else:
+                        self.assertIs(run_config, config)
+                        self.assertEqual(run_config.experiment_name, "typed_runner")
+                    return {"train_loss": [0.2], "val_loss": [0.3]}
+
+                results = run_experiments(config, run_fn=runner, output_dir=tmpdir,
+                                          param_grid={"training.lr": [0.1]} if sweep else None)
+                self.assertEqual(received_trials, [1, 2])
+                self.assertEqual(len(results[0]["metrics"] if sweep else results), 2)
 
     def test_sweep_monitor_override_completes_final_report(self):
         config = {"experiment_name": "monitor_override", "training": {"monitor": "val_loss"},
@@ -198,7 +225,9 @@ class TestExperiments(unittest.TestCase):
         runner = create_trial_runner(dummy_model_factory, interrupting_loader_factory)
         with tempfile.TemporaryDirectory() as tmpdir:
             res = run_experiments(config, num_trials=1, run_fn=runner, output_dir=tmpdir)
-            self.assertEqual(res, [])
+            self.assertEqual(len(res), 1)
+            self.assertEqual(res[0]["status"], "interrupted")
+            self.assertEqual(res[0]["val_loss"], [])
             self.assertTrue(Path(tmpdir).exists())
 
 

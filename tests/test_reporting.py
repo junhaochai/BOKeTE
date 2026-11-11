@@ -15,9 +15,47 @@ from bokete.reporting import (
     experiment_report,
     trial_report,
 )
+from bokete.utils import log_model_info
 
 
 class TestReporting(unittest.TestCase):
+
+    def test_extra_metric_columns_retain_order_and_nonnumeric_values(self):
+        histories = [
+            {"train_loss": [0.2], "val_loss": [0.3],
+             "extra_metrics": {"z": "0.9", "note": "first", "empty": None}},
+            {"train_loss": [0.3], "val_loss": [0.4],
+             "extra_metrics": {"a": 0.4, "z": 0.7, "note": "second"}},
+        ]
+        configuration = config_report({}, histories, auto_plot=False)
+        self.assertIn("| Z | Note | Empty | A |", configuration)
+        self.assertIn("**Mean Z:** `0.8000 ± 0.1000`", configuration)
+        self.assertNotIn("**Mean Note:**", configuration)
+        self.assertNotIn("**Mean Empty:**", configuration)
+        self.assertIn("`first`", configuration)
+        self.assertIn("`second`", configuration)
+        sweep = experiment_report({}, [
+            {"parameters": {"training.lr": 0.01}, "metrics": histories},
+            {"parameters": {"training.lr": 0.02}, "metrics": [histories[1]]},
+        ])
+        self.assertIn("| Mean Z | Mean Note | Mean Empty | Mean A |", sweep)
+        self.assertIn("`0.8000 ± 0.1000` | `N/A` | `N/A` | `0.4000 ± 0.0000`", sweep)
+
+    def test_wrapped_model_logging_and_metadata_reports_agree(self):
+        model = nn.Sequential(nn.Linear(4, 3), nn.ReLU(), nn.Linear(3, 1))
+        for parameter in model[0].parameters():
+            parameter.requires_grad_(False)
+        wrapped = nn.DataParallel(model)
+        with self.assertLogs("bokete.utils", level="INFO"):
+            metadata = log_model_info(wrapped, log_layers=True)
+        self.assertEqual(metadata["model_name"], "Sequential")
+        self.assertEqual(metadata["total_params"], 19)
+        self.assertEqual(metadata["trainable_params"], 4)
+        history = TrainingMetrics(train_loss=[0.2], val_loss=[0.3], start_time="2026-01-01 10:00:00")
+        with self.assertNoLogs("bokete.utils", level="INFO"):
+            actual = trial_report({}, metrics=history, model=wrapped, auto_plot=False)
+            from_metadata = trial_report({}, metrics=history, model=metadata, auto_plot=False)
+        self.assertEqual(actual, from_metadata)
 
     def test_bare_history_uses_configured_monitor_in_report_and_plot(self):
         config = {"training": {"monitor": "val_accuracy"}}

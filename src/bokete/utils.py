@@ -21,6 +21,7 @@ from dataclasses import fields, is_dataclass
 from datetime import datetime
 import logging
 import os
+import platform
 import random
 import sys
 from pathlib import Path
@@ -152,16 +153,46 @@ class BOKeTEFormatter(logging.Formatter):
 
 
 def set_seed(seed: int, deterministic: bool = False) -> None:
-    """Seed Python, NumPy and PyTorch (CPU and all CUDA devices) for reproducibility."""
+    """Seed global RNGs and explicitly enable or disable deterministic execution.
+
+    Deterministic mode raises for operations without a deterministic alternative.
+    Configure it before creating CUDA objects. Disabling it leaves any cuBLAS
+    workspace environment setting intact, but removes algorithm restrictions.
+    """
+    if deterministic:
+        os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
+    torch.use_deterministic_algorithms(deterministic)
+    torch.backends.cudnn.deterministic = deterministic
+    torch.backends.cudnn.benchmark = False
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-    if deterministic:
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-        os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+
+def _deterministic_settings() -> Dict[str, Any]:
+    return {
+        'algorithms': torch.are_deterministic_algorithms_enabled(),
+        'warn_only': torch.is_deterministic_algorithms_warn_only_enabled(),
+        'cudnn': torch.backends.cudnn.deterministic,
+        'cublas_workspace_config': os.environ.get('CUBLAS_WORKSPACE_CONFIG'),
+    }
+
+
+def runtime_metadata() -> Dict[str, Any]:
+    """Capture the execution environment as plain checkpoint-safe values."""
+    from bokete import __version__
+
+    return {
+        'python': platform.python_version(),
+        'bokete': __version__,
+        'pytorch': str(torch.__version__),
+        'numpy': np.__version__,
+        'cuda': torch.version.cuda,
+        'cudnn_version': torch.backends.cudnn.version(),
+        'deterministic': _deterministic_settings(),
+        'cudnn_benchmark': torch.backends.cudnn.benchmark,
+    }
 
 
 def get_device_name(device: Optional[torch.device | str] = None) -> str:
@@ -347,6 +378,17 @@ def log_experiment_start(
 
 
 
+def _model_info(model: torch.nn.Module) -> Dict[str, Any]:
+    """Collect model metadata without logging or changing the model."""
+    raw_model = getattr(model, "module", model)
+    return {
+        "model_name": raw_model.__class__.__name__,
+        "total_params": sum(p.numel() for p in raw_model.parameters()),
+        "trainable_params": sum(p.numel() for p in raw_model.parameters() if p.requires_grad),
+        "structure": str(raw_model),
+    }
+
+
 def log_model_info(
     model: torch.nn.Module,
     log_layers: bool = False,
@@ -356,29 +398,19 @@ def log_model_info(
     If log_layers is True (or logger DEBUG level is active), also logs full layer structure.
     Returns a dictionary containing model_name, total_params, trainable_params, and structure.
     """
-    raw_model = getattr(model, "module", model)
-    model_name = raw_model.__class__.__name__
-
-    total_params = sum(p.numel() for p in raw_model.parameters())
-    trainable_params = sum(p.numel() for p in raw_model.parameters() if p.requires_grad)
-    structure_str = str(raw_model)
+    info = _model_info(model)
 
     logger.info(
-        f"[BOKeTE] Model architecture: {model_name} "
-        f"({total_params:,} total params | {trainable_params:,} trainable params)"
+        f"[BOKeTE] Model architecture: {info['model_name']} "
+        f"({info['total_params']:,} total params | {info['trainable_params']:,} trainable params)"
     )
 
     if log_layers or logger.isEnabledFor(logging.DEBUG):
         logger.info("")
-        logger.info(f"[BOKeTE] Model layer structure:\n{structure_str}")
+        logger.info(f"[BOKeTE] Model layer structure:\n{info['structure']}")
         logger.info("")
 
-    return {
-        "model_name": model_name,
-        "total_params": total_params,
-        "trainable_params": trainable_params,
-        "structure": structure_str,
-    }
+    return info
 
 
 def setup_logging(

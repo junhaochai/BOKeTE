@@ -1,5 +1,6 @@
 experiment_name: "mnist_mlp_demo"
 seed: 42
+deterministic: false # true enforces deterministic algorithms; false allows faster alternatives
 trials: 3
 
 # Optional: Uncomment param_grid to run a multi-config hyperparameter sweep
@@ -23,3 +24,9 @@ training:
   patience: 3
   save_checkpoints: true
   monitor: "val_accuracy" # Higher wins; use val_loss for lower-is-better selection
+  # Resume paths are explicit. Sweeps use "configuration:trial" keys (both 1-indexed).
+  # With param_grid removed, use trial-only keys such as "1" or "2".
+  # resume_from:
+  #   "1:2": "results/previous/001_lr_0.001_hidden_dim_64/trial_2/checkpoints/last.pt"
+  # resume_best_from: # Optional; otherwise a matching neighbouring best.pt is retained
+  #   "1:2": "results/previous/001_lr_0.001_hidden_dim_64/trial_2/checkpoints/best.pt"
