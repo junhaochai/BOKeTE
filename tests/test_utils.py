@@ -95,7 +95,7 @@ class TestUtils(unittest.TestCase):
             experiment_name: str = "default_exp"
             sub: SubConfig = field(default_factory=SubConfig)
 
-        config_path = Path("example/configs/example.yaml")
+        config_path = Path("src/bokete/templates/starter/configs/example.yaml")
         if config_path.exists():
             parsed = load_config_as(config_path, RootConfig)
             self.assertIsInstance(parsed, RootConfig)
@@ -108,7 +108,7 @@ class TestUtils(unittest.TestCase):
         class DummyConfig:
             experiment_name: str = "default_exp"
 
-        config_path = Path("example/configs/example.yaml")
+        config_path = Path("src/bokete/templates/starter/configs/example.yaml")
         if config_path.exists():
             cfg = parse_cli_config(
                 DummyConfig,
@@ -125,8 +125,8 @@ class TestUtils(unittest.TestCase):
 
     def test_resolve_config_path(self):
         # 1. Exact path resolution
-        resolved = resolve_config_path("example/configs/example.yaml")
-        self.assertEqual(resolved, Path("example/configs/example.yaml"))
+        resolved = resolve_config_path("src/bokete/templates/starter/configs/example.yaml")
+        self.assertEqual(resolved, Path("src/bokete/templates/starter/configs/example.yaml"))
 
         # 2. Short name / configs/ folder resolution via mocking
         with patch.object(Path, "is_file", side_effect=[False, True]):

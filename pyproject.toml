@@ -39,16 +39,11 @@ bokete = "bokete.cli:main"
 dev = [
     "torchvision",
 ]
+docs = [
+    "mkdocs>=1.6.1",
+    "mkdocstrings[python]>=1.0.6",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/bokete"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"example/.gitignore" = "bokete/example/.gitignore"
-"example/main.py" = "bokete/example/main.py"
-"example/pyproject.toml" = "bokete/example/pyproject.toml"
-"example/configs/example.yaml" = "bokete/example/configs/example.yaml"
-"example/src/__init__.py" = "bokete/example/src/__init__.py"
-"example/src/models.py" = "bokete/example/src/models.py"
-"example/src/schema.py" = "bokete/example/src/schema.py"
 

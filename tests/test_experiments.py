@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
+from bokete.cli import init_project
 from bokete.experiments import create_trial_runner, run_experiments
 from bokete.metrics import TrainingMetrics
 
@@ -91,17 +92,14 @@ class TestExperiments(unittest.TestCase):
     def test_example_run(self):
         import runpy
         import sys
-        project_root = str(Path(__file__).resolve().parent.parent)
-        if project_root not in sys.path:
-            sys.path.insert(0, project_root)
-
-        orig_argv = sys.argv
-        sys.argv = ["main.py", "--config", "example/configs/example.yaml"]
-        try:
-            res = runpy.run_path("example/main.py")
-            self.assertIsNotNone(res)
-        finally:
-            sys.argv = orig_argv
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("bokete.cli.Path.cwd", return_value=Path(tmpdir)):
+                init_project("demo")
+            project = Path(tmpdir) / "demo"
+            with patch.object(sys, "path", sys.path.copy()), \
+                    patch.object(sys, "argv", ["main.py", "--config", str(project / "configs/example.yaml")]):
+                res = runpy.run_path(str(project / "main.py"))
+                self.assertTrue(callable(res["main"]))
 
     def test_create_trial_runner(self):
         def model_factory(cfg):

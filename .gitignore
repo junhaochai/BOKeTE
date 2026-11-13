@@ -46,3 +46,6 @@ data/
 
 # Dev notes
 khe.txt
+
+# Generated documentation
+/site/

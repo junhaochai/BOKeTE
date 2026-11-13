@@ -256,18 +256,19 @@ class TestConfigRegressions(unittest.TestCase):
 
 
 class TestScaffoldRegressions(unittest.TestCase):
-    def test_generated_template_is_portable_and_excludes_runtime_files(self):
-        manifest = {"main.py", "pyproject.toml", ".gitignore", "src/__init__.py", "src/models.py",
-                    "src/schema.py", "configs/example.yaml"}
+    def test_generated_template_copies_nested_files_and_is_portable(self):
+        template = ROOT / "src" / "bokete" / "templates" / "starter"
+        manifest = {path.relative_to(template).as_posix() for path in template.rglob("*") if path.is_file()}
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            source = root / "package" / "example"
-            for name in manifest:
-                destination = source / name
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(ROOT / "example" / name, destination)
+            source = root / "package" / "templates" / "starter"
+            shutil.copytree(template, source)
+            extra_file = source / "assets" / "notes.txt"
+            extra_file.parent.mkdir()
+            extra_file.write_text("Additional starter asset", encoding="utf-8")
+            manifest.add("assets/notes.txt")
             for name in ("uv.lock", ".venv/marker", "data/marker", "results/marker", "src/__pycache__/marker.pyc"):
-                path = source / name
+                path = root / "example" / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("local artefact", encoding="utf-8")
             work = root / "workspace"
@@ -279,6 +280,8 @@ class TestScaffoldRegressions(unittest.TestCase):
             generated = work / "projects" / "demo"
             files = {path.relative_to(generated).as_posix() for path in generated.rglob("*") if path.is_file()}
             self.assertEqual(files, manifest)
+            self.assertEqual((generated / "assets" / "notes.txt").read_text(encoding="utf-8"),
+                             "Additional starter asset")
             project = (generated / "pyproject.toml").read_text(encoding="utf-8")
             self.assertIn('name = "demo"', project)
             self.assertNotIn('path = ".."', project)

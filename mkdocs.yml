@@ -1,0 +1,24 @@
+site_name: BOKeTE
+
+theme:
+  name: readthedocs
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - User guide: usage.md
+  - API reference: reference.md
+
+exclude_docs: |
+  /study/
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            filters: public
+            show_if_no_docstring: true
