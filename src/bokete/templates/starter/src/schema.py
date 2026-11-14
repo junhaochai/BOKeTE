@@ -20,6 +20,9 @@ class TrainingConfig:
     lr: float = 1e-3
     optimizer: str = "Adam"
     loss: str = "CrossEntropyLoss"
+    amp: bool = False
+    max_grad_norm: Optional[float] = None
+    log_interval: int = 1
     patience: Optional[int] = 3
     save_checkpoints: bool = True
     monitor: str = "val_accuracy"
@@ -32,6 +35,7 @@ class ExperimentConfig:
     experiment_name: str = "mnist_mlp_demo"
     seed: int = 42
     deterministic: bool = False
+    device: Optional[str] = None
     trials: int = 3
     param_grid: Optional[Dict[str, List[Any]]] = None
     data: DataConfig = field(default_factory=DataConfig)

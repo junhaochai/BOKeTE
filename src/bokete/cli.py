@@ -12,7 +12,7 @@ import shutil
 import sys
 
 from bokete import __version__
-from bokete.utils import Colours
+from bokete.colours import Colours
 
 
 def init_project(target_dir_name: str) -> None:

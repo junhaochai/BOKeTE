@@ -57,8 +57,3 @@ the generated API reference. Preview the documentation website locally:
 ```powershell
 uv run --group docs mkdocs serve
 ```
-
-## Permissions
-
-> [!NOTE]
-> **Personal Tooling & Permissions**: `bokete` is a personal PyTorch helper library made publicly visible for portfolio review and inspection. From `0.2.0` onwards, including `0.2.0.dev0`, reuse requires prior written permission from [Jun Hao Chai](https://github.com/junhaochai), except where applicable law, hosting-platform terms or existing licence grants permit otherwise. Earlier MIT-licensed versions and material retain their original permissions; their notices remain in the earlier releases and Git history. See [LICENSE](LICENSE) for current terms. The software is provided "as is", without warranty, guaranteed support or promises of backward compatibility.

@@ -43,6 +43,10 @@ Thumbs.db
 *.log
 results/
 data/
+!/src/bokete/templates/starter/data/
+!/src/bokete/templates/starter/data/.gitkeep
+!/src/bokete/templates/starter/results/
+!/src/bokete/templates/starter/results/.gitkeep
 
 # Dev notes
 khe.txt

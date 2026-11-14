@@ -166,6 +166,7 @@ def trial_report(
     out_file = utils.resolve_output_path(save_path, "report.md")
     config_dict, param_rows = _format_config_table(config)
     configured_monitor = utils.get_nested_key(config_dict, "training.monitor")
+    graph_available = True
 
     # Detect if a TrainingMetrics or metrics dict was passed as 2nd positional argument
     if hasattr(metrics_summary, 'train_loss') or (
@@ -190,8 +191,10 @@ def trial_report(
 
         if auto_plot and graph_filename and m.get('train_loss') and m.get('val_loss'):
             graph_path = (out_file.parent / graph_filename) if out_file else Path(graph_filename)
-            plotting.plot_loss_curves(metrics=m, best_epoch=selection['best_epoch'], path=graph_path,
-                                      title=title or "Training and Validation Loss")
+            graph_available = plotting.plot_loss_curves(
+                metrics=m, best_epoch=selection['best_epoch'], path=graph_path,
+                title=title or "Training and Validation Loss",
+            )
 
     metrics_summary = dict(metrics_summary or {})
     monitor = configured_monitor or metrics_summary.get('monitor', 'val_loss')
@@ -309,7 +312,7 @@ def trial_report(
         for epoch, (t, v) in enumerate(zip(train_loss, val_loss))
     ])
     loss_graph = (f"\n## Loss Curves\n![Loss Curve](./{graph_filename})\n"
-                  if graph_filename and train_loss and val_loss else "")
+                  if graph_available and graph_filename and train_loss and val_loss else "")
     runtime_section = _runtime_section([recorded])
 
     report_md = f"""# {header_title}
@@ -367,9 +370,10 @@ def config_report(
     selections = [metrics_mod.selection_summary(m, monitor) for m in all_trial_metrics]
     completed_metrics = [m for m in all_trial_metrics if not m.get("interrupted")]
 
+    graph_available = False
     if auto_plot and graph_filename and out_file and completed_metrics:
         graph_path = out_file.parent / graph_filename
-        plotting.plot_multi_trial_loss_curves(
+        graph_available = plotting.plot_multi_trial_loss_curves(
             all_trial_metrics=completed_metrics,
             path=graph_path,
             title="Multi-Trial Training & Validation Loss (Mean ± Std)",
@@ -454,7 +458,7 @@ def config_report(
     model_line = f"{model_bullet}\n" if model_bullet else ""
 
     loss_graph_section = ""
-    if auto_plot and graph_filename and any(m.get('train_loss') and m.get('val_loss') for m in completed_metrics):
+    if graph_available:
         loss_graph_section = f"\n## Multi-Trial Loss Curves\n![Multi-Trial Loss Curve](./{graph_filename})\n"
 
     runtime_section = _runtime_section(all_trial_metrics)

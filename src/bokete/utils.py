@@ -33,6 +33,8 @@ import re
 import tqdm
 import yaml
 
+from bokete.colours import Colours
+
 logger = logging.getLogger(__name__)
 
 
@@ -48,17 +50,6 @@ class TqdmLoggingHandler(logging.StreamHandler):
                 self.flush()
         except Exception:
             self.handleError(record)
-
-
-# Design System Tokens & Formatting Helpers
-class Colours:
-    """Design System ANSI Colour Tokens for console formatting."""
-    RESET = "\033[0m"
-    NAVY = "\033[34m"
-    ROYAL_BLUE = "\033[94m"
-    CYAN = "\033[36m"
-    BRIGHT_CYAN = "\033[96m"
-    BOLD_CYAN = "\033[1;36m"
 
 
 # Backwards-compatible aliases
@@ -114,7 +105,7 @@ class BOKeTEFormatter(logging.Formatter):
         self.use_colors = use_colors
 
     def format(self, record: logging.LogRecord) -> str:
-        if not record.msg or record.msg == "\n":
+        if (not record.msg or record.msg == "\n") and not (record.exc_info or record.exc_text or record.stack_info):
             return ""
 
         orig_msg = record.getMessage()
@@ -138,6 +129,12 @@ class BOKeTEFormatter(logging.Formatter):
                     msg = f"{parts[0]}:{self.ROYAL_BLUE}{parts[1]}{self.RESET}"
 
             formatted = f"{prefix}{msg}"
+            if record.exc_info and not record.exc_text:
+                record.exc_text = self.formatException(record.exc_info)
+            if record.exc_text:
+                formatted += "\n" + record.exc_text
+            if record.stack_info:
+                formatted += "\n" + self.formatStack(record.stack_info)
         else:
             formatted = super().format(record)
             formatted = self.ANSI_REGEX.sub("", formatted)
@@ -444,6 +441,7 @@ def setup_logging(
         )
         if not already_attached:
             fh = logging.FileHandler(file_path, mode="a", encoding="utf-8")
+            fh.set_name("bokete.file")
             file_formatter = BOKeTEFormatter(use_colors=False)
             fh.setFormatter(file_formatter)
             root_logger.addHandler(fh)
@@ -479,10 +477,10 @@ def create_progress_bar(
 
 
 def close_file_loggers() -> None:
-    """Closes and detaches all FileHandlers from the root logger to release OS file locks."""
+    """Close and detach BOKeTE-owned file handlers, preserving host handlers."""
     root_logger = logging.getLogger()
     for h in list(root_logger.handlers):
-        if isinstance(h, logging.FileHandler):
+        if isinstance(h, logging.FileHandler) and h.get_name() == "bokete.file":
             h.close()
             root_logger.removeHandler(h)
 
@@ -583,17 +581,23 @@ def load_config_as(config_path: str | Path, dataclass_cls: Type[T]) -> T:
     Recursively converts nested dictionaries into nested dataclass instances where applicable.
     Unspecified fields automatically retain their dataclass default values;
     explicit null values are preserved. Postponed annotations are resolved
-    before converting nested dataclasses.
+    before converting nested dataclasses. Unknown keys are ignored with a
+    warning that includes their configuration path.
     """
     raw = load_config(config_path)
 
-    def _from_dict(cls: Type[Any], data: Dict[str, Any]) -> Any:
+    def _from_dict(cls: Type[Any], data: Dict[str, Any], prefix: str = "") -> Any:
         if not is_dataclass(cls) or not isinstance(data, dict):
             return data
 
         field_types = get_type_hints(cls)
+        declared_fields = fields(cls)
+        unknown = data.keys() - {f.name for f in declared_fields}
+        if unknown:
+            logger.warning("[BOKeTE] Ignoring unknown configuration keys: %s",
+                           ", ".join(sorted(f"{prefix}{key}" for key in unknown)))
         kwargs = {}
-        for f in fields(cls):
+        for f in declared_fields:
             if f.name in data:
                 val = data[f.name]
                 target_type = field_types[f.name]
@@ -601,7 +605,7 @@ def load_config_as(config_path: str | Path, dataclass_cls: Type[T]) -> T:
                 if len(type_args) == 2 and type(None) in type_args:
                     target_type = next(arg for arg in type_args if arg is not type(None))
                 if is_dataclass(target_type) and isinstance(val, dict):
-                    kwargs[f.name] = _from_dict(target_type, val)
+                    kwargs[f.name] = _from_dict(target_type, val, f"{prefix}{f.name}.")
                 else:
                     kwargs[f.name] = val
         return cls(**kwargs)

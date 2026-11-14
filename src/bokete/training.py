@@ -33,6 +33,16 @@ import bokete.utils as utils
 logger = logging.getLogger(__name__)
 
 
+_HISTORY_FIELDS = (
+    "train_loss", "val_loss", "val_accuracy",
+    "best_epoch", "best_val_loss", "best_score", "stopped_early",
+)
+
+
+def _callback_types(callbacks):
+    return [f"{type(cb).__module__}.{type(cb).__qualname__}" for cb in callbacks]
+
+
 class TrainingInterrupted(KeyboardInterrupt):
     """Carry completed epoch history while preserving KeyboardInterrupt semantics."""
 
@@ -470,6 +480,57 @@ class Trainer:
             raise ValueError("Cannot train on an empty loader or with no valid targets.")
         return round(avg_loss, 4)
 
+    def _restore_checkpoint(self, path, history, loaders, stateful_callbacks, checkpoints):
+        """Validate and restore a completed-epoch checkpoint; return its epoch."""
+        saved = torch.load(path, map_location="cpu", weights_only=True)
+        state = saved.get("training_state")
+        if (state is None or state.get("version") != 1
+                or "optimizer_state_dict" not in saved):
+            raise ValueError("Checkpoint does not contain supported full training state.")
+        if saved["monitor"] != self.monitor or saved["mode"] != self.mode:
+            raise ValueError("Resume requires the same monitored metric.")
+        if state["amp_active"] != self.amp_active:
+            raise ValueError("Resume requires the same AMP configuration.")
+        if "deterministic" in state:
+            settings = ("algorithms", "warn_only", "cudnn")
+            if self.device.type == "cuda" and state["deterministic"]["algorithms"]:
+                settings += ("cublas_workspace_config",)
+            current_settings = utils._deterministic_settings()
+            if any(state["deterministic"][key] != current_settings[key] for key in settings):
+                raise ValueError("Resume requires the same deterministic settings.")
+        if state["callback_types"] != _callback_types(stateful_callbacks):
+            raise ValueError("Resume requires matching stateful callback types and order.")
+        if len(state["callback_states"]) != len(stateful_callbacks):
+            raise ValueError("Checkpoint callback state is incomplete.")
+
+        raw_model = getattr(self.model, "module", self.model)
+        raw_model.load_state_dict(saved["model_state_dict"])
+        for cb, cb_state in zip(stateful_callbacks, state["callback_states"]):
+            cb.load_state_dict(cb_state)
+        self.optimizer.load_state_dict(saved["optimizer_state_dict"])
+        self.scaler.load_state_dict(state["scaler_state_dict"])
+        for field in _HISTORY_FIELDS:
+            setattr(history, field, state["history"][field])
+        for cb in checkpoints:
+            cb.best_score = history.best_score
+
+        self.should_stop = history.stopped_early
+        _restore_rng_state(state["rng_state"], loaders)
+        return saved["epoch"]
+
+    def _build_checkpoint_state(self, history, loaders, stateful_callbacks):
+        """Capture training state after epoch-end callbacks have completed."""
+        return {
+            "version": 1,
+            "amp_active": self.amp_active,
+            "deterministic": utils._deterministic_settings(),
+            "scaler_state_dict": self.scaler.state_dict(),
+            "callback_types": _callback_types(stateful_callbacks),
+            "callback_states": [cb.state_dict() for cb in stateful_callbacks],
+            "history": {field: getattr(history, field) for field in _HISTORY_FIELDS},
+            "rng_state": _capture_rng_state(loaders),
+        }
+
     def fit(
         self,
         train_loader: DataLoader,
@@ -544,53 +605,11 @@ class Trainer:
             and callable(getattr(cb, "state_dict", None))
             and callable(getattr(cb, "load_state_dict", None))
         ]
-        callback_types = [
-            f"{type(cb).__module__}.{type(cb).__qualname__}"
-            for cb in stateful_callbacks
-        ]
-        history_fields = (
-            "train_loss", "val_loss", "val_accuracy",
-            "best_epoch", "best_val_loss", "best_score", "stopped_early",
-        )
-
         start_epoch = 0
         if resume_from is not None:
-            saved = torch.load(resume_from, map_location="cpu", weights_only=True)
-            state = saved.get("training_state")
-            if (state is None or state.get("version") != 1
-                    or "optimizer_state_dict" not in saved):
-                raise ValueError("Checkpoint does not contain supported full training state.")
-            if saved["monitor"] != monitor or saved["mode"] != self.mode:
-                raise ValueError("Resume requires the same monitored metric.")
-            if state["amp_active"] != self.amp_active:
-                raise ValueError("Resume requires the same AMP configuration.")
-            if "deterministic" in state:
-                settings = ("algorithms", "warn_only", "cudnn")
-                if self.device.type == "cuda" and state["deterministic"]["algorithms"]:
-                    settings += ("cublas_workspace_config",)
-                current_settings = utils._deterministic_settings()
-                if any(state["deterministic"][key] != current_settings[key] for key in settings):
-                    raise ValueError("Resume requires the same deterministic settings.")
-            if state["callback_types"] != callback_types:
-                raise ValueError("Resume requires matching stateful callback types and order.")
-            if len(state["callback_states"]) != len(stateful_callbacks):
-                raise ValueError("Checkpoint callback state is incomplete.")
-
-            raw_model = getattr(self.model, "module", self.model)
-            raw_model.load_state_dict(saved["model_state_dict"])
-            for cb, cb_state in zip(stateful_callbacks, state["callback_states"]):
-                cb.load_state_dict(cb_state)
-            self.optimizer.load_state_dict(saved["optimizer_state_dict"])
-            self.scaler.load_state_dict(state["scaler_state_dict"])
-            for field in history_fields:
-                setattr(m_obj, field, state["history"][field])
-            for cb in checkpoints:
-                cb.best_score = m_obj.best_score
-
-            start_epoch = saved["epoch"]
-            self.should_stop = m_obj.stopped_early
-            _restore_rng_state(state["rng_state"], loaders)
-            del saved, state
+            start_epoch = self._restore_checkpoint(
+                resume_from, m_obj, loaders, stateful_callbacks, checkpoints,
+            )
 
         try:
             for epoch in range(start_epoch, epochs):
@@ -655,18 +674,9 @@ class Trainer:
 
                 m_obj.stopped_early = self.should_stop
                 if checkpoints:
-                    self._checkpoint_state = {
-                        "version": 1,
-                        "amp_active": self.amp_active,
-                        "deterministic": utils._deterministic_settings(),
-                        "scaler_state_dict": self.scaler.state_dict(),
-                        "callback_types": callback_types,
-                        "callback_states": [cb.state_dict() for cb in stateful_callbacks],
-                        "history": {
-                            field: getattr(m_obj, field) for field in history_fields
-                        },
-                        "rng_state": _capture_rng_state(loaders),
-                    }
+                    self._checkpoint_state = self._build_checkpoint_state(
+                        m_obj, loaders, stateful_callbacks,
+                    )
                     for cb in checkpoints:
                         cb.on_epoch_end(self, epoch + 1, val_loss)
 

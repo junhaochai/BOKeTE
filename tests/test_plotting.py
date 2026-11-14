@@ -5,12 +5,23 @@ Unit tests for bokete metric plotting utilities.
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from bokete.metrics import TrainingMetrics
 from bokete.plotting import plot_loss_curves, plot_multi_trial_loss_curves
 
 
 class TestPlotting(unittest.TestCase):
+    def test_plot_failures_return_false(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            history = {"train_loss": [0.5], "val_loss": [0.6]}
+            for plot, args in ((plot_loss_curves, (history,)),
+                               (plot_multi_trial_loss_curves, ([history],))):
+                with self.subTest(plot=plot.__name__), \
+                        patch("matplotlib.figure.Figure.savefig", side_effect=OSError("simulated failure")), \
+                        self.assertLogs("bokete.plotting", level="ERROR"):
+                    self.assertFalse(plot(*args, path=Path(tmpdir) / "missing.png"))
+
 
     def test_plot_loss_curves_with_metrics_object(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -20,7 +31,7 @@ class TestPlotting(unittest.TestCase):
                 best_epoch=2,
             )
             graph_path = str(Path(tmp_dir) / "curves.png")
-            plot_loss_curves(history, path=graph_path)
+            self.assertTrue(plot_loss_curves(history, path=graph_path))
             self.assertTrue(Path(graph_path).exists())
 
     def test_plot_multi_trial_loss_curves(self):
@@ -30,7 +41,7 @@ class TestPlotting(unittest.TestCase):
                 {"train_loss": [0.75, 0.35], "val_loss": [0.80, 0.40]},
             ]
             graph_path = str(Path(tmp_dir) / "multi_curves.png")
-            plot_multi_trial_loss_curves(all_trial_metrics, path=graph_path)
+            self.assertTrue(plot_multi_trial_loss_curves(all_trial_metrics, path=graph_path))
             self.assertTrue(Path(graph_path).exists())
 
 

@@ -3,6 +3,8 @@ Unit tests for bokete utility functions (seeds, hardware detection, config I/O, 
 """
 
 import tempfile
+import logging
+import sys
 import unittest
 from pathlib import Path
 
@@ -29,10 +31,61 @@ from bokete.utils import (
     resolve_output_path,
     set_seed,
     setup_logging,
+    close_file_loggers,
+    BOKeTEFormatter,
 )
 
 
 class TestUtils(unittest.TestCase):
+    def test_cleanup_preserves_host_file_handler(self):
+        root_logger = logging.getLogger()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            host = logging.FileHandler(Path(tmpdir) / "host.log")
+            root_logger.addHandler(host)
+            try:
+                setup_logging(log_file=Path(tmpdir) / "experiment.log", console=False)
+                owned = next(h for h in root_logger.handlers if isinstance(h, logging.FileHandler)
+                             and Path(h.baseFilename) == Path(tmpdir) / "experiment.log")
+                close_file_loggers()
+                self.assertIn(host, root_logger.handlers)
+                self.assertIsNotNone(host.stream)
+                self.assertNotIn(owned, root_logger.handlers)
+                self.assertIsNone(owned.stream)
+            finally:
+                root_logger.removeHandler(host)
+                host.close()
+                close_file_loggers()
+
+    def test_coloured_formatter_preserves_exception_and_stack(self):
+        try:
+            raise ValueError("diagnostic evidence")
+        except ValueError:
+            record = logging.LogRecord("probe", logging.ERROR, __file__, 1, "failed", (), sys.exc_info(),
+                                       sinfo="Stack evidence")
+        formatted = BOKeTEFormatter(use_colors=True).format(record)
+        self.assertIn("Traceback", formatted)
+        self.assertIn("ValueError: diagnostic evidence", formatted)
+        self.assertIn("Stack evidence", formatted)
+        record.msg = ""
+        self.assertIn("ValueError: diagnostic evidence", BOKeTEFormatter(use_colors=True).format(record))
+
+    def test_unknown_config_keys_warn_with_nested_path(self):
+        from dataclasses import dataclass, field
+
+        @dataclass
+        class Training:
+            lr: float = 0.001
+
+        @dataclass
+        class Config:
+            training: Training = field(default_factory=Training)
+
+        with patch("bokete.utils.load_config", return_value={"training": {"lr": 0.0, "lrr": 0.1}}), \
+                self.assertLogs("bokete.utils", level="WARNING") as captured:
+            config = load_config_as("unused.yaml", Config)
+        self.assertEqual(config.training.lr, 0.0)
+        self.assertIn("training.lrr", "\n".join(captured.output))
+
 
     def test_set_seed(self):
         set_seed(42)

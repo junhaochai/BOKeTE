@@ -21,7 +21,7 @@ import bokete
 from bokete.cli import init_project
 from bokete.experiments import create_trial_runner, run_experiments
 from bokete.metrics import TrainingMetrics
-from bokete.reporting import config_report
+from bokete.reporting import config_report, trial_report
 from bokete.training import Checkpoint, Trainer, evaluate
 from bokete.utils import create_run_directory, load_config, load_config_as, resolve_config_path
 
@@ -290,6 +290,18 @@ class TestScaffoldRegressions(unittest.TestCase):
 
 
 class TestReportingRegressions(unittest.TestCase):
+    def test_failed_plots_are_not_linked_in_reports(self):
+        history = {"train_loss": [0.5], "val_loss": [0.6]}
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch("matplotlib.figure.Figure.savefig", side_effect=OSError("simulated failure")), \
+                self.assertLogs("bokete.plotting", level="ERROR"):
+            trial = trial_report({}, metrics=history, save_path=Path(tmpdir) / "trial" / "report.md")
+            configuration = config_report({}, [history], save_path=Path(tmpdir) / "config-report.md")
+            self.assertTrue((Path(tmpdir) / "trial" / "report.md").is_file())
+            self.assertTrue((Path(tmpdir) / "config-report.md").is_file())
+        self.assertNotIn("![Loss Curve]", trial)
+        self.assertNotIn("![Multi-Trial Loss Curve]", configuration)
+
     def test_partial_histories_do_not_crash_configuration_report(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             report = config_report({}, [{"train_loss": [1.], "val_loss": [2.]}, {"train_loss": [3.]}], save_path=tmpdir)
@@ -297,9 +309,10 @@ class TestReportingRegressions(unittest.TestCase):
             self.assertTrue((Path(tmpdir) / "multi_trial_loss.png").exists())
             self.assertIn("Trial 2", report)
 
-    def test_readme_report_call_accepts_its_documented_arguments(self):
+    def test_getting_started_report_call_accepts_its_documented_arguments(self):
         calls = []
-        for block in re.findall(r"```python\n(.*?)```", (ROOT / "README.md").read_text(encoding="utf-8"), re.DOTALL):
+        documentation = ROOT / "docs" / "getting-started.md"
+        for block in re.findall(r"```python\n(.*?)```", documentation.read_text(encoding="utf-8"), re.DOTALL):
             for node in ast.walk(ast.parse(block)):
                 if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                         and node.func.attr in ("trial_report", "experiment_report")
@@ -311,7 +324,7 @@ class TestReportingRegressions(unittest.TestCase):
                 if keyword.arg == "save_path":
                     keyword.value = ast.Constant(str(Path(tmpdir) / "report.md"))
             expression = ast.fix_missing_locations(ast.Expression(calls[0]))
-            report = eval(compile(expression, "README.md", "eval"), {
+            report = eval(compile(expression, str(documentation), "eval"), {
                 "bokete": bokete, "config": {},
                 "history": TrainingMetrics(train_loss=[0.2], val_loss=[0.3]),
             })

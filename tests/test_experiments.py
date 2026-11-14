@@ -18,6 +18,38 @@ from bokete.metrics import TrainingMetrics
 
 
 class TestExperiments(unittest.TestCase):
+    def test_starter_controls_reach_trainer_and_preserve_zero(self):
+        from dataclasses import asdict
+        from bokete.templates.starter.src.schema import ExperimentConfig
+        from bokete.utils import load_config_as
+
+        raw = {"experiment_name": "controls", "device": "cpu", "training": {
+            "lr": 0.0, "epochs": 0, "amp": True, "max_grad_norm": 0.0,
+            "log_interval": 0, "save_checkpoints": False,
+        }}
+        with patch("bokete.utils.load_config", return_value=raw):
+            config = asdict(load_config_as("unused.yaml", ExperimentConfig))
+        runner = create_trial_runner(lambda cfg: nn.Linear(1, 1), lambda cfg: ([], []))
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch("bokete.trial_runner.training.Trainer") as trainer, \
+                patch("bokete.trial_runner.reporting.trial_report"), \
+                patch("bokete.trial_runner.utils.determine_device") as detect:
+            trainer.return_value.fit.return_value = TrainingMetrics()
+            runner(1, config, output_dir=tmpdir)
+        self.assertEqual(trainer.call_args.args[2].param_groups[0]["lr"], 0.0)
+        self.assertEqual(trainer.call_args.kwargs["device"], torch.device("cpu"))
+        self.assertTrue(trainer.call_args.kwargs["amp"])
+        self.assertEqual(trainer.call_args.kwargs["max_grad_norm"], 0.0)
+        self.assertEqual(trainer.return_value.fit.call_args.kwargs["epochs"], 0)
+        self.assertEqual(trainer.return_value.fit.call_args.kwargs["log_interval"], 0)
+        detect.assert_not_called()
+
+    def test_non_positive_trial_counts_are_rejected(self):
+        for count in (0, -1):
+            with self.subTest(count=count), self.assertRaisesRegex(ValueError, "positive integer"):
+                run_experiments({"experiment_name": "invalid", "trials": 3},
+                                run_fn=lambda *args, **kwargs: {}, num_trials=count)
+
 
     def test_dataclass_config_preserved_for_custom_runner_and_normalised_for_sweep(self):
         @dataclass
@@ -145,7 +177,7 @@ class TestExperiments(unittest.TestCase):
                 "experiment_name": "test_fn_test",
                 "training": {"epochs": 1, "lr": 0.01, "loss": "MSELoss", "optimizer": "Adam"},
             }
-            with patch("bokete.experiments.torch.load", wraps=torch.load) as load_checkpoint:
+            with patch("bokete.trial_runner.torch.load", wraps=torch.load) as load_checkpoint:
                 res = runner(1, config, output_dir=tmpdir)
             self.assertEqual(load_checkpoint.call_args.kwargs["map_location"], "cpu")
             self.assertIn("extra_metrics", res)
@@ -169,9 +201,9 @@ class TestExperiments(unittest.TestCase):
                     checkpoint_dir.mkdir(parents=True)
                     # Invalid content must never be read when this run saves no checkpoint.
                     (checkpoint_dir / "best.pt").write_bytes(b"previous run")
-                with patch("bokete.experiments.training.Trainer.fit", return_value=history):
-                    with patch("bokete.experiments.reporting.trial_report"):
-                        with patch("bokete.experiments.torch.load") as load_checkpoint:
+                with patch("bokete.trial_runner.training.Trainer.fit", return_value=history):
+                    with patch("bokete.trial_runner.reporting.trial_report"):
+                        with patch("bokete.trial_runner.torch.load") as load_checkpoint:
                             result = runner(1, config, output_dir=tmpdir)
                 load_checkpoint.assert_not_called()
                 self.assertEqual(result["extra_metrics"], {"Final accuracy": 0.4})

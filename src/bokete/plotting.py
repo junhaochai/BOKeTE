@@ -14,8 +14,8 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-def _finalise_plot(fig: Figure, ax, save_path: Path, title: str, log_label: str) -> None:
-    """Applies BOKeTE plot styling and saves figure to disk."""
+def _finalise_plot(fig: Figure, ax, save_path: Path, title: str, log_label: str) -> bool:
+    """Apply plot styling and return whether saving the figure succeeded."""
     ax.set_title(title, fontsize=14, pad=15)
     ax.set_xlabel('Epochs', fontsize=12)
     ax.set_ylabel('Loss', fontsize=12)
@@ -26,8 +26,10 @@ def _finalise_plot(fig: Figure, ax, save_path: Path, title: str, log_label: str)
         save_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(save_path, dpi=150, bbox_inches='tight')
         logger.info(f"[BOKeTE] Saved {log_label} plot to: {save_path}")
+        return True
     except Exception as e:
         logger.error(f"Failed to save {log_label} plot to {save_path}: {e}")
+        return False
 
 
 def plot_loss_curves(
@@ -37,11 +39,12 @@ def plot_loss_curves(
     title='Training and Validation Loss',
     best_epoch=None,
     metrics=None,
-):
+) -> bool:
     """
     Plot per-epoch training and validation loss and save a static PNG to `path`.
 
     Accepts either individual `train_loss` / `val_loss` lists or a `TrainingMetrics` / dict instance.
+    Returns True when saved, or False when skipped or saving fails.
     """
     # Support passing TrainingMetrics or dict as first positional argument
     if hasattr(train_loss, 'train_loss') or (isinstance(train_loss, dict) and 'train_loss' in train_loss):
@@ -60,7 +63,7 @@ def plot_loss_curves(
 
     if not train_loss or not val_loss:
         logger.warning("Empty loss lists passed to plot_loss_curves. Skipping plot.")
-        return
+        return False
 
     # Handle mismatched lengths just in case
     num_epochs = min(len(train_loss), len(val_loss))
@@ -81,16 +84,17 @@ def plot_loss_curves(
         ax.axvline(x=best_epoch, color='#7570b3', linestyle='--', alpha=0.8, label=f'Selected Epoch ({best_epoch})')
         ax.plot(best_epoch, best_val, 'ro', markersize=8, label=f'Val Loss at Selected Epoch ({best_val:.4f})')
 
-    _finalise_plot(fig, ax, save_path, title, log_label="loss curves")
+    return _finalise_plot(fig, ax, save_path, title, log_label="loss curves")
 
 
 def plot_multi_trial_loss_curves(
     all_trial_metrics: list,
     path="multi_trial_loss.png",
     title="Multi-Trial Loss Curves (Mean ± Std)",
-):
+) -> bool:
     """
     Plots multi-trial training and validation loss curves with mean and std shaded bands.
+    Returns True when saved, or False when skipped or saving fails.
     """
     paired_losses = [
         (m['train_loss'], m['val_loss']) for m in all_trial_metrics
@@ -99,7 +103,7 @@ def plot_multi_trial_loss_curves(
 
     if not paired_losses:
         logger.warning("Empty multi-trial loss lists passed to plot_multi_trial_loss_curves. Skipping plot.")
-        return
+        return False
     train_losses, val_losses = zip(*paired_losses)
 
     min_epochs = min(min(len(t) for t in train_losses), min(len(v) for v in val_losses))
@@ -130,5 +134,5 @@ def plot_multi_trial_loss_curves(
     ax.fill_between(epochs, t_mean - t_std, t_mean + t_std, color='#2b5c8f', alpha=0.15)
     ax.fill_between(epochs, v_mean - v_std, v_mean + v_std, color='#d95f02', alpha=0.15)
 
-    _finalise_plot(fig, ax, save_path, title, log_label="multi-trial loss curves")
+    return _finalise_plot(fig, ax, save_path, title, log_label="multi-trial loss curves")
 
