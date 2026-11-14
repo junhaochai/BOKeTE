@@ -104,6 +104,7 @@ def plot_multi_trial_loss_curves(
     if not paired_losses:
         logger.warning("Empty multi-trial loss lists passed to plot_multi_trial_loss_curves. Skipping plot.")
         return False
+
     train_losses, val_losses = zip(*paired_losses)
 
     min_epochs = min(min(len(t) for t in train_losses), min(len(v) for v in val_losses))

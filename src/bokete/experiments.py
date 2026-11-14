@@ -37,6 +37,7 @@ def _run_trials(
     exp_label = config.get("experiment_name") if isinstance(config, dict) else getattr(config, "experiment_name", None)
     if not exp_label or not str(exp_label).strip():
         raise ValueError("Configuration must explicitly define 'experiment_name'.")
+
     monitor_config = asdict(config) if is_dataclass(config) else config
     configured_monitor = utils.get_nested_key(monitor_config, "training.monitor")
     if configured_monitor is not None:
@@ -68,28 +69,36 @@ def _run_trials(
                                monitor=configured_monitor or "val_loss", interrupted=True,
                                runtime=utils.runtime_metadata(),
                            ).as_dict())
+
                 metrics["interrupted"] = True
+
             if metrics:
                 if active_model is None:
                     active_model = getattr(run_fn, "model_metadata", None)
+
                 metrics = dict(metrics)
                 metrics["trial"] = i
                 metrics["status"] = "interrupted" if metrics.get("interrupted") else "completed"
                 metrics["run_dir"] = str(Path(output_dir) / f"trial_{i}")
+
             if metrics:
                 all_trial_metrics.append(metrics)
+
                 if metrics.get("interrupted"):
                     logger.warning("[BOKeTE] Trial %s interrupted; stopping remaining trials.", i)
                     break
+
                 selection = metrics_mod.selection_summary(metrics, configured_monitor)
                 if selection['best_score'] is not None:
                     best_val = selection['best_score']
                     metric_label = utils.format_metric_name(selection['monitor'])
+
                     logger.info("")
                     logger.info(f"[BOKeTE] Trial {i} complete — Best {metric_label}: {utils.Colours.BRIGHT_CYAN}{best_val:.4f}{utils.Colours.RESET}")
                 else:
                     logger.info("")
                     logger.info(f"[BOKeTE] Trial {i} complete")
+
         t1 = time.time()
         end_dt = datetime.now()
         end_time = end_dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -112,12 +121,14 @@ def _run_trials(
         # Reuse the monitored scores already recorded by each trial.
         selections = [metrics_mod.selection_summary(m, configured_monitor) for m in all_trial_metrics
                       if not m.get("interrupted")]
+
         best_val_losses = [s['best_score'] for s in selections if s['best_score'] is not None]
         if best_val_losses:
             mean_val = float(np.mean(best_val_losses))
             std_val = float(np.std(best_val_losses))
             min_val = float(np.min(best_val_losses))
             max_val = float(np.max(best_val_losses))
+
             summary_label = f" for {utils.format_tag(exp_label)}" if exp_label else ""
             logger.info("")
             logger.info(
@@ -125,10 +136,12 @@ def _run_trials(
                 f"Time Taken: {utils.Colours.BRIGHT_CYAN}{utils.format_duration(duration_seconds)}{utils.Colours.RESET} "
                 f"(Start: {start_time}, End: {end_time}) ==="
             )
+
             logger.info(
                 f"[BOKeTE] Mean Best {utils.format_metric_name(selections[0]['monitor'])}: {utils.Colours.BRIGHT_CYAN}{mean_val:.4f} ± {std_val:.4f}{utils.Colours.RESET} "
                 f"(Min: {utils.Colours.CYAN}{min_val:.4f}{utils.Colours.RESET}, Max: {utils.Colours.CYAN}{max_val:.4f}{utils.Colours.RESET})"
             )
+
             logger.info("")
     except KeyboardInterrupt as exc:
         # Report generation can also be interrupted after trials have finished.
@@ -177,6 +190,7 @@ def run_experiments(
     n_trials = num_trials if num_trials is not None else configured_trials
     if isinstance(n_trials, bool) or not isinstance(n_trials, int) or n_trials < 1:
         raise ValueError("num_trials must be a positive integer.")
+
     exp_name = target_config.get("experiment_name") if isinstance(target_config, dict) else getattr(target_config, "experiment_name", None)
 
     if grid:
@@ -202,11 +216,13 @@ def run_experiments(
                 run_config = copy.deepcopy(base_cfg)
                 for key, scoped in resume_maps.items():
                     utils.set_nested_key(run_config, f"training.{key}", scoped.get(idx, {}))
+
                 params_used = {}
                 folder_parts = []
                 for key, value in zip(keys, combo):
                     utils.set_nested_key(run_config, key, value)
                     params_used[key] = value
+
                     short_k = key.split(".")[-1]
                     clean_v = str(value).replace(" ", "").replace(":", "-").replace("/", "-").replace("\\", "")
                     folder_parts.append(f"{short_k}_{clean_v}")
@@ -225,18 +241,22 @@ def run_experiments(
                     output_dir=str(combo_dir),
                     model=model,
                 )
+
                 results.append({
                     "parameters": params_used,
                     "metrics": trial_metrics,
                     "run_dir": str(combo_dir),
                     "status": "interrupted" if any(m.get("interrupted") for m in trial_metrics) else "completed",
                 })
+
                 if results[-1]["status"] == "interrupted":
                     break
         except KeyboardInterrupt as exc:
             utils.close_file_loggers()
+
             logger.warning("")
             logger.warning(f"[BOKeTE] Experiment sweep {utils.format_tag(exp_name)} aborted by user (Ctrl+C).")
+
             if hasattr(exc, "trial_metrics"):
                 results.append({
                     "parameters": params_used,
@@ -267,6 +287,7 @@ def run_experiments(
             end_time=sweep_end_time,
             duration_seconds=sweep_duration,
         )
+
         return results
 
     try:
@@ -279,6 +300,7 @@ def run_experiments(
         )
     except KeyboardInterrupt as exc:
         utils.close_file_loggers()
+
         logger.warning("")
         logger.warning(f"[BOKeTE] Experiment {utils.format_tag(exp_name)} aborted by user (Ctrl+C).")
         return getattr(exc, "trial_metrics", [])
@@ -292,6 +314,7 @@ def _sweep_resume_maps(config, total_configurations, num_trials):
         paths = utils.get_nested_key(resume_config, f"training.{key}", default={})
         if not isinstance(paths, dict):
             raise ValueError(f"training.{key} must map configuration:trial keys to checkpoint paths in sweeps.")
+
         scoped = {}
         for label, path in paths.items():
             parts = str(label).split(":")
@@ -300,6 +323,7 @@ def _sweep_resume_maps(config, total_configurations, num_trials):
             configuration, trial = map(int, parts)
             if configuration > total_configurations or trial > num_trials:
                 raise ValueError(f"training.{key} addresses a configuration or trial outside this sweep.")
+
             scoped.setdefault(configuration, {})[trial] = path
         resume_maps[key] = scoped
 

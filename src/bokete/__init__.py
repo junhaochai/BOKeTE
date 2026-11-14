@@ -135,6 +135,7 @@ def __getattr__(name):
         module_name = _EXPORT_MODULES[name]
     except KeyError:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
+
     value = getattr(import_module(f".{module_name}", __name__), name)
     globals()[name] = value
     return value

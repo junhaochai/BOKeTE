@@ -30,7 +30,9 @@ class TestPlotting(unittest.TestCase):
                 val_loss=[0.85, 0.45],
                 best_epoch=2,
             )
+
             graph_path = str(Path(tmp_dir) / "curves.png")
+
             self.assertTrue(plot_loss_curves(history, path=graph_path))
             self.assertTrue(Path(graph_path).exists())
 
@@ -40,7 +42,9 @@ class TestPlotting(unittest.TestCase):
                 {"train_loss": [0.8, 0.4], "val_loss": [0.85, 0.45]},
                 {"train_loss": [0.75, 0.35], "val_loss": [0.80, 0.40]},
             ]
+
             graph_path = str(Path(tmp_dir) / "multi_curves.png")
+
             self.assertTrue(plot_multi_trial_loss_curves(all_trial_metrics, path=graph_path))
             self.assertTrue(Path(graph_path).exists())
 

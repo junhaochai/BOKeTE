@@ -22,6 +22,7 @@ def init_project(target_dir_name: str) -> None:
             f"{Colours.NAVY}[BOKeTE Error]{Colours.RESET} Target directory '{target_dir_name}' already exists.",
             file=sys.stderr,
         )
+
         sys.exit(1)
 
     template_dir = Path(__file__).parent / "templates" / "starter"
@@ -30,6 +31,7 @@ def init_project(target_dir_name: str) -> None:
             f"{Colours.NAVY}[BOKeTE Error]{Colours.RESET} Starter example directory could not be located.",
             file=sys.stderr,
         )
+
         sys.exit(1)
 
     shutil.copytree(template_dir, target_path)
@@ -38,8 +40,10 @@ def init_project(target_dir_name: str) -> None:
     project_toml = target_path / "pyproject.toml"
     if project_toml.exists():
         content = project_toml.read_text(encoding="utf-8")
+
         content = content.replace("bokete-starter", target_path.name)
         content = content.replace('"bokete",', f'"bokete>={__version__}",')
+
         project_toml.write_text(content, encoding="utf-8")
 
     print(f"{Colours.BOLD_CYAN}[BOKeTE]{Colours.RESET} Initialized new experiment project in '{Colours.BRIGHT_CYAN}{target_dir_name}{Colours.RESET}'!")

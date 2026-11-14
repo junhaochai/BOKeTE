@@ -9,6 +9,7 @@ class SimpleMLP(nn.Module):
         self, input_dim: int = 784, hidden_dim: int = 128, num_classes: int = 10
     ) -> None:
         super().__init__()
+
         self.net = nn.Sequential(
             nn.Flatten(),
             nn.Linear(input_dim, hidden_dim),

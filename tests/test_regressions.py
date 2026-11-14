@@ -43,9 +43,11 @@ class _DeferredConfig:
 class TestTrainingRegressions(unittest.TestCase):
     def test_legacy_scaler_api_is_used_when_modern_api_is_absent(self):
         model = nn.Linear(1, 1)
+
         with patch.object(torch.amp, "GradScaler", None, create=True), \
                 patch.object(torch.cuda.amp, "GradScaler", return_value=sentinel.scaler) as legacy:
             trainer = Trainer(model, nn.MSELoss(), torch.optim.SGD(model.parameters(), lr=0.1), device="cpu")
+
         self.assertIs(trainer.scaler, sentinel.scaler)
         legacy.assert_called_once_with(enabled=False)
 
@@ -64,6 +66,7 @@ class TestTrainingRegressions(unittest.TestCase):
 
                 with patch("bokete.training.torch.save", side_effect=fail_save), self.assertRaises(OSError):
                     checkpoint.update(model, epoch=2, val_loss=0.4)
+
                 self.assertEqual(path.read_bytes(), original)
                 self.assertEqual(torch.load(path, weights_only=True)["epoch"], 1)
                 self.assertEqual(checkpoint.best_score, 0.5)
@@ -75,9 +78,12 @@ class TestTrainingRegressions(unittest.TestCase):
             with self.subTest(reduction=reduction):
                 loader = DataLoader(TensorDataset(torch.tensor([[0.], [0.], [3.]]), targets), batch_size=2)
                 actual = evaluate(nn.Identity(), loader, nn.MSELoss(reduction=reduction), device="cpu")
+
                 self.assertAlmostEqual(actual, expected)
+
         better = DataLoader(TensorDataset(torch.tensor([[0.], [0.], [3.]]), targets), batch_size=2)
         worse = DataLoader(TensorDataset(torch.full((3, 1), 2.0), targets), batch_size=2)
+
         self.assertLess(evaluate(nn.Identity(), better, nn.MSELoss(), device="cpu"),
                         evaluate(nn.Identity(), worse, nn.MSELoss(), device="cpu"))
 
@@ -89,7 +95,9 @@ class TestTrainingRegressions(unittest.TestCase):
                     model.weight.fill_(1)
                 trainer = Trainer(model, nn.MSELoss(reduction=reduction),
                                   torch.optim.SGD(model.parameters(), lr=0), device="cpu")
+
                 loader = DataLoader(TensorDataset(torch.tensor([[0.], [0.], [3.]]), torch.zeros(3, 1)), batch_size=2)
+
                 self.assertEqual(trainer._train_epoch(loader, show_progress=False), expected)
 
     def test_weighted_class_losses_and_ignored_batches_match_full_dataset(self):
@@ -104,6 +112,7 @@ class TestTrainingRegressions(unittest.TestCase):
                         loader = DataLoader(TensorDataset(inputs, targets), batch_size=2)
                         result = evaluate(nn.Identity(), loader, criterion, device="cpu", collect_accuracy=accuracy)
                         actual = result["val_loss"] if accuracy else result
+
                         self.assertAlmostEqual(actual, criterion(inputs, targets).item(), places=6)
 
     def test_probability_targets_and_label_smoothing_match_full_loss(self):
@@ -112,6 +121,7 @@ class TestTrainingRegressions(unittest.TestCase):
             with self.subTest(target_shape=targets.shape):
                 criterion = nn.CrossEntropyLoss(weight=torch.tensor([0.2, 2.]), label_smoothing=0.1)
                 loader = DataLoader(TensorDataset(logits, targets), batch_size=2)
+
                 self.assertAlmostEqual(evaluate(nn.Identity(), loader, criterion, device="cpu"),
                                        criterion(logits, targets).item(), places=6)
 
@@ -120,6 +130,7 @@ class TestTrainingRegressions(unittest.TestCase):
         targets = torch.tensor([[0.2, 0.8], [0.7, 0.3], [0.4, 0.6]])
         criterion = nn.KLDivLoss(reduction="batchmean")
         loader = DataLoader(TensorDataset(logits, targets), batch_size=2)
+
         self.assertAlmostEqual(evaluate(nn.Identity(), loader, criterion, device="cpu"),
                                criterion(logits, targets).item(), places=6)
 
@@ -131,6 +142,7 @@ class TestTrainingRegressions(unittest.TestCase):
                 criterion = nn.CrossEntropyLoss(weight=torch.tensor([0., 1.]), label_smoothing=smoothing)
                 loader = DataLoader(TensorDataset(logits, targets), batch_size=1)
                 result = evaluate(nn.Identity(), loader, criterion, device="cpu", collect_accuracy=True)
+
                 self.assertEqual(result["val_accuracy"], 0.5)
                 self.assertAlmostEqual(result["val_loss"], criterion(logits, targets).item(), places=6)
 
@@ -139,6 +151,7 @@ class TestTrainingRegressions(unittest.TestCase):
         targets = torch.tensor([[0.2, 0.5, 0.3]])
         loader = [(logits[:2], targets), (logits[2:], targets)]
         criterion = nn.KLDivLoss(reduction="batchmean")
+
         self.assertAlmostEqual(evaluate(nn.Identity(), loader, criterion, device="cpu"),
                                criterion(logits, targets).item(), places=6)
 
@@ -146,23 +159,28 @@ class TestTrainingRegressions(unittest.TestCase):
         inputs = torch.tensor([[0.], [0.], [3.]])
         loader = [(inputs[:2], {"expected": torch.zeros(2, 1)}),
                   (inputs[2:], {"expected": torch.zeros(1, 1)})]
+
         criterion = lambda outputs, targets: (outputs - targets["expected"]).square().mean()
         prepare = lambda batch, device: batch
+
         self.assertEqual(evaluate(nn.Identity(), loader, criterion, device="cpu", prepare_batch=prepare), 3.0)
         model = nn.Linear(1, 1, bias=False)
         with torch.no_grad():
             model.weight.fill_(1)
         trainer = Trainer(model, criterion, torch.optim.SGD(model.parameters(), lr=0),
                           device="cpu", prepare_batch=prepare)
+
         self.assertEqual(trainer._train_epoch(loader, show_progress=False), 3.0)
 
     def test_empty_validation_never_creates_a_best_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             model = nn.Linear(1, 1)
             trainer = Trainer(model, nn.MSELoss(), torch.optim.SGD(model.parameters(), lr=0.1), device="cpu")
+
             with patch.object(trainer, "_train_epoch", return_value=0.2), \
                     self.assertRaisesRegex(ValueError, "empty loader"):
                 trainer.fit([], [], epochs=1, checkpoint=Checkpoint(tmpdir), progress=False)
+
             self.assertFalse((Path(tmpdir) / "best.pt").exists())
 
 
@@ -171,10 +189,12 @@ class TestExperimentRegressions(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "existing.txt"
             path.write_text("keep this", encoding="utf-8")
+
             with patch("bokete.experiments.reporting.config_report"):
                 result = run_experiments({"experiment_name": "interrupted"},
                                          run_fn=lambda *args, **kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
                                          output_dir=tmpdir)
+
             self.assertEqual(len(result), 1)
             self.assertTrue(result[0]["interrupted"])
             self.assertTrue(path.exists())
@@ -182,12 +202,15 @@ class TestExperimentRegressions(unittest.TestCase):
 
     def test_interrupt_preserves_last_completed_epoch(self):
         runner = create_trial_runner(lambda cfg: nn.Linear(1, 1), lambda cfg: ([], []))
+
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch.object(Trainer, "_train_epoch", return_value=0.2), \
                     patch.object(Trainer, "evaluate", side_effect=[0.5, KeyboardInterrupt()]), \
                     self.assertRaises(KeyboardInterrupt):
                 runner(1, {"experiment_name": "interrupted", "training": {"epochs": 2}}, output_dir=tmpdir)
+
             path = Path(tmpdir) / "trial_1" / "checkpoints" / "last.pt"
+
             self.assertTrue(path.exists())
             self.assertEqual(torch.load(path, weights_only=True)["epoch"], 1)
 
@@ -199,7 +222,9 @@ class TestExperimentRegressions(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             results = run_experiments({"experiment_name": "collision"}, run_fn=runner, output_dir=tmpdir,
                                       param_grid={"data.path": ["a/b", "a-b"]})
+
             paths = [Path(result["run_dir"]) for result in results]
+
             self.assertEqual(len(set(paths)), 2)
             self.assertEqual([(path / "marker.txt").read_text(encoding="utf-8") for path in paths], ["a/b", "a-b"])
 
@@ -219,7 +244,9 @@ class TestExperimentRegressions(unittest.TestCase):
             with patch.object(Path, "iterdir", synchronised_scan), ThreadPoolExecutor(max_workers=2) as executor:
                 futures = [executor.submit(create_run_directory, base_dir=tmpdir,
                                            experiment_name="concurrent", attach_file_logger=False) for _ in range(2)]
+
                 paths = [future.result(timeout=15) for future in futures]
+
             self.assertEqual(len(set(paths)), 2)
             self.assertTrue(all(path.is_dir() for path in paths))
 
@@ -239,6 +266,7 @@ class TestConfigRegressions(unittest.TestCase):
             previous = Path.cwd()
             try:
                 os.chdir(root)
+
                 self.assertEqual(load_config(explicit)["experiment_name"], "intended")
                 self.assertEqual(resolve_config_path("same"), Path("configs/same.yaml"))
                 self.assertEqual(resolve_config_path("missing/same.yaml"), Path("missing/same.yaml"))
@@ -248,9 +276,11 @@ class TestConfigRegressions(unittest.TestCase):
     def test_explicit_null_and_deferred_nested_annotations(self):
         with patch("bokete.utils.load_config", return_value={"training": {"epochs": 7, "patience": None}}):
             config = load_config_as("unused.yaml", _DeferredConfig)
+
         self.assertIsInstance(config.training, _TrainingConfig)
         self.assertEqual(config.training.epochs, 7)
         self.assertIsNone(config.training.patience)
+
         with patch("bokete.utils.load_config", return_value={}):
             self.assertEqual(load_config_as("unused.yaml", _DeferredConfig).training.patience, 3)
 
@@ -273,16 +303,21 @@ class TestScaffoldRegressions(unittest.TestCase):
                 path.write_text("local artefact", encoding="utf-8")
             work = root / "workspace"
             work.mkdir()
+
             with patch("bokete.cli.__file__", str(root / "package" / "cli.py")), \
                     patch("bokete.cli.Path.cwd", return_value=work), \
                     patch("sys.stdout", new_callable=io.StringIO) as output:
                 init_project("projects/demo")
+
             generated = work / "projects" / "demo"
             files = {path.relative_to(generated).as_posix() for path in generated.rglob("*") if path.is_file()}
+
             self.assertEqual(files, manifest)
             self.assertEqual((generated / "assets" / "notes.txt").read_text(encoding="utf-8"),
                              "Additional starter asset")
+
             project = (generated / "pyproject.toml").read_text(encoding="utf-8")
+
             self.assertIn('name = "demo"', project)
             self.assertNotIn('path = ".."', project)
             self.assertIn(f'"bokete>={bokete.__version__}"', project)
@@ -292,19 +327,23 @@ class TestScaffoldRegressions(unittest.TestCase):
 class TestReportingRegressions(unittest.TestCase):
     def test_failed_plots_are_not_linked_in_reports(self):
         history = {"train_loss": [0.5], "val_loss": [0.6]}
+
         with tempfile.TemporaryDirectory() as tmpdir, \
                 patch("matplotlib.figure.Figure.savefig", side_effect=OSError("simulated failure")), \
                 self.assertLogs("bokete.plotting", level="ERROR"):
             trial = trial_report({}, metrics=history, save_path=Path(tmpdir) / "trial" / "report.md")
             configuration = config_report({}, [history], save_path=Path(tmpdir) / "config-report.md")
+
             self.assertTrue((Path(tmpdir) / "trial" / "report.md").is_file())
             self.assertTrue((Path(tmpdir) / "config-report.md").is_file())
+
         self.assertNotIn("![Loss Curve]", trial)
         self.assertNotIn("![Multi-Trial Loss Curve]", configuration)
 
     def test_partial_histories_do_not_crash_configuration_report(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             report = config_report({}, [{"train_loss": [1.], "val_loss": [2.]}, {"train_loss": [3.]}], save_path=tmpdir)
+
             self.assertTrue((Path(tmpdir) / "config-report.md").exists())
             self.assertTrue((Path(tmpdir) / "multi_trial_loss.png").exists())
             self.assertIn("Trial 2", report)
@@ -318,7 +357,9 @@ class TestReportingRegressions(unittest.TestCase):
                         and node.func.attr in ("trial_report", "experiment_report")
                         and any(keyword.arg == "metrics" for keyword in node.keywords)):
                     calls.append(node)
+
         self.assertEqual(len(calls), 1)
+
         with tempfile.TemporaryDirectory() as tmpdir:
             for keyword in calls[0].keywords:
                 if keyword.arg == "save_path":
@@ -328,5 +369,6 @@ class TestReportingRegressions(unittest.TestCase):
                 "bokete": bokete, "config": {},
                 "history": TrainingMetrics(train_loss=[0.2], val_loss=[0.3]),
             })
+
             self.assertIn("Final Validation Loss", report)
             self.assertTrue((Path(tmpdir) / "report.md").exists())

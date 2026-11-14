@@ -27,7 +27,9 @@ class TestReporting(unittest.TestCase):
             {"train_loss": [0.3], "val_loss": [0.4],
              "extra_metrics": {"a": 0.4, "z": 0.7, "note": "second"}},
         ]
+
         configuration = config_report({}, histories, auto_plot=False)
+
         self.assertIn("| Z | Note | Empty | A |", configuration)
         self.assertIn("**Mean Z:** `0.8000 ± 0.1000`", configuration)
         self.assertNotIn("**Mean Note:**", configuration)
@@ -38,6 +40,7 @@ class TestReporting(unittest.TestCase):
             {"parameters": {"training.lr": 0.01}, "metrics": histories},
             {"parameters": {"training.lr": 0.02}, "metrics": [histories[1]]},
         ])
+
         self.assertIn("| Mean Z | Mean Note | Mean Empty | Mean A |", sweep)
         self.assertIn("`0.8000 ± 0.1000` | `N/A` | `N/A` | `0.4000 ± 0.0000`", sweep)
 
@@ -46,32 +49,40 @@ class TestReporting(unittest.TestCase):
         for parameter in model[0].parameters():
             parameter.requires_grad_(False)
         wrapped = nn.DataParallel(model)
+
         with self.assertLogs("bokete.utils", level="INFO"):
             metadata = log_model_info(wrapped, log_layers=True)
+
         self.assertEqual(metadata["model_name"], "Sequential")
         self.assertEqual(metadata["total_params"], 19)
         self.assertEqual(metadata["trainable_params"], 4)
         history = TrainingMetrics(train_loss=[0.2], val_loss=[0.3], start_time="2026-01-01 10:00:00")
+
         with self.assertNoLogs("bokete.utils", level="INFO"):
             actual = trial_report({}, metrics=history, model=wrapped, auto_plot=False)
             from_metadata = trial_report({}, metrics=history, model=metadata, auto_plot=False)
+
         self.assertEqual(actual, from_metadata)
 
     def test_bare_history_uses_configured_monitor_in_report_and_plot(self):
         config = {"training": {"monitor": "val_accuracy"}}
         history = {"train_loss": [0.3, 0.2], "val_loss": [0.1, 0.5], "val_accuracy": [0.6, 0.9]}
+
         with patch("bokete.reporting.plotting.plot_loss_curves") as plot:
             report = trial_report(config, metrics=history)
+
         self.assertIn("**Selected Epoch:** `2` (Validation Accuracy: `0.9`)", report)
         self.assertEqual(plot.call_args.kwargs['best_epoch'], 2)
         self.assertEqual(plot.call_args.kwargs['metrics']['monitor'], 'val_accuracy')
         self.assertNotIn('monitor', history)
         aggregate = config_report(config, [history], auto_plot=False)
+
         self.assertIn("| Trial 1 | `2` | `0.9` |", aggregate)
 
     def test_trial_report_rejects_conflicting_monitor_metadata(self):
         config = {"training": {"monitor": "val_accuracy"}}
         history = {"train_loss": [0.2], "val_loss": [0.1], "monitor": "val_loss"}
+
         with self.assertRaisesRegex(ValueError, "different monitoring"):
             trial_report(config, metrics=history, auto_plot=False)
 
@@ -82,9 +93,11 @@ class TestReporting(unittest.TestCase):
                 history = {"train_loss": [0.3, 0.2], "val_loss": [0.1, 0.5], "val_accuracy": [0.6, 0.9]}
                 if recorded:
                     history['monitor'] = 'val_accuracy'
+
                 report = experiment_report(config, [{
                     "parameters": {"training.monitor": "val_accuracy"}, "metrics": [history],
                 }])
+
                 self.assertIn("**Selection Metric:** `val_accuracy` (maximise)", report)
                 self.assertIn("**Best Validation Accuracy:** `0.9000", report)
 
@@ -92,20 +105,25 @@ class TestReporting(unittest.TestCase):
         config = {"experiment_name": "accuracy_selection", "training": {"monitor": "val_accuracy"}}
         first = {"train_loss": [0.2, 0.1], "val_loss": [0.1, 0.5],
                  "val_accuracy": [0.6, 0.9], "monitor": "val_accuracy"}
+
         second = {"train_loss": [0.2, 0.1], "val_loss": [0.05, 0.04],
                   "val_accuracy": [0.7, 0.8], "monitor": "val_accuracy"}
+
         md = trial_report(config=config, metrics=first, auto_plot=False)
+
         self.assertIn("**Selected Epoch:** `2` (Validation Accuracy: `0.9`)", md)
         self.assertIn("Selected Epoch Validation Loss | `0.5`", md)
         self.assertIn("Final Validation Accuracy | `0.9`", md)
         self.assertIn("| 2 | 0.1000 | 0.5000 | 0.9000 |", md)
         aggregate = config_report(config, [second, first], auto_plot=False)
+
         self.assertIn("Best Trial Validation Accuracy:** `0.9000` (Trial 2)", aggregate)
         self.assertIn("| Trial 2 | `2` | `0.9` |", aggregate)
         sweep = experiment_report(config, [
             {"parameters": {"model.name": "lower_loss"}, "metrics": [second]},
             {"parameters": {"model.name": "higher_accuracy"}, "metrics": [first]},
         ])
+
         self.assertIn("**Configuration:** `model.name=higher_accuracy`", sweep)
         self.assertIn("| 1 | `model.name=higher_accuracy` |", sweep)
         self.assertIn("**Selection Metric:** `val_accuracy` (maximise)", sweep)
@@ -127,7 +145,9 @@ class TestReporting(unittest.TestCase):
             'val_loss': [0.95, 0.6, 0.3],
             'best_epoch': 3,
         }
+
         summary = training_report(metrics_dict)
+
         self.assertEqual(summary['final_train_loss'], 0.2)
         self.assertEqual(summary['final_val_loss'], 0.3)
         self.assertEqual(summary['best_epoch'], 3)
@@ -141,6 +161,7 @@ class TestReporting(unittest.TestCase):
             'mean_val_loss': 0.6167,
             'best_epoch': 3,
         }
+
         train_loss = [0.9, 0.5, 0.2]
         val_loss = [0.95, 0.6, 0.3]
 
@@ -167,6 +188,7 @@ class TestReporting(unittest.TestCase):
                 best_epoch=3,
                 best_val_loss=0.3,
             )
+
             graph_path = str(Path(tmp_dir) / "graph_clean.png")
 
             md = trial_report(
@@ -188,6 +210,7 @@ class TestReporting(unittest.TestCase):
             save_file = Path(tmp_dir) / "subfolder" / "report.md"
 
             md = trial_report(config=config, metrics=history, save_path=str(save_file))
+
             self.assertTrue(save_file.exists())
             self.assertEqual(save_file.read_text(encoding="utf-8"), md)
 
@@ -197,9 +220,11 @@ class TestReporting(unittest.TestCase):
             {"train_loss": [0.9, 0.5, 0.2], "val_loss": [0.95, 0.6, 0.3]},
             {"train_loss": [0.8, 0.4, 0.15], "val_loss": [0.9, 0.5, 0.25]},
         ]
+
         with tempfile.TemporaryDirectory() as tmp_dir:
             save_file = Path(tmp_dir) / "summary.md"
             summary_md = config_report(config, all_metrics, save_path=str(save_file))
+
             self.assertIn("# Configuration Report: quick_test", summary_md)
             self.assertIn("- **Experiment Name:** `quick_test`", summary_md)
             self.assertIn("Mean Best Validation Loss:", summary_md)
@@ -219,6 +244,7 @@ class TestReporting(unittest.TestCase):
                 save_path=tmp_path,
                 title="Test Report",
             )
+
             self.assertIn("Test Report", report_md)
             self.assertTrue((tmp_path / "report.md").exists())
             self.assertTrue((tmp_path / "graph.png").exists())
@@ -229,8 +255,10 @@ class TestReporting(unittest.TestCase):
             nn.ReLU(),
             nn.Linear(5, 1)
         )
+
         config = {"experiment_name": "model_test", "lr": 0.01}
         metrics = TrainingMetrics(train_loss=[0.5, 0.2], val_loss=[0.6, 0.3])
+
         with tempfile.TemporaryDirectory() as tmp_dir:
             report_md = trial_report(
                 config=config,
@@ -239,6 +267,7 @@ class TestReporting(unittest.TestCase):
                 save_path=tmp_dir,
                 title="Model Logging Report",
             )
+
             self.assertIn("## Model Architecture", report_md)
             self.assertIn("- **Model Class:** `Sequential`", report_md)
             self.assertIn("Sequential", report_md)
@@ -257,6 +286,7 @@ class TestReporting(unittest.TestCase):
             'duration_seconds': 135.0,
             'device_name': 'cuda:0 (NVIDIA GeForce RTX 4090)',
         }
+
         train_loss = [0.9, 0.2]
         val_loss = [0.95, 0.3]
 
@@ -281,6 +311,7 @@ class TestReporting(unittest.TestCase):
             {"train_loss": [0.9, 0.2], "val_loss": [0.95, 0.3]},
             {"train_loss": [0.8, 0.15], "val_loss": [0.9, 0.25]},
         ]
+
         with tempfile.TemporaryDirectory() as tmp_dir:
             summary_md = config_report(
                 config,
@@ -290,6 +321,7 @@ class TestReporting(unittest.TestCase):
                 end_time='2026-08-12 12:05:00',
                 duration_seconds=300.0,
             )
+
             self.assertIn("- **Start Date:** `2026-08-12 12:00:00`", summary_md)
             self.assertIn("- **End Date:** `2026-08-12 12:05:00`", summary_md)
             self.assertIn("- **Total Time Taken:** `05m 00s` (`300.00s`)", summary_md)
@@ -301,10 +333,12 @@ class TestReporting(unittest.TestCase):
             nn.ReLU(),
             nn.Linear(5, 1)
         )
+
         config = {"experiment_name": "config_model_test", "lr": 0.001}
         all_metrics = [
             {"train_loss": [0.9, 0.2], "val_loss": [0.95, 0.3]},
         ]
+
         with tempfile.TemporaryDirectory() as tmpdir:
             summary_md = config_report(
                 config,
@@ -312,6 +346,7 @@ class TestReporting(unittest.TestCase):
                 save_path=tmpdir,
                 model=model,
             )
+
             self.assertIn("## Model Architecture", summary_md)
             self.assertIn("- **Model Class:** `Sequential`", summary_md)
             self.assertTrue((Path(tmpdir) / "config-report.md").exists())
@@ -334,6 +369,7 @@ class TestReporting(unittest.TestCase):
                 ],
             },
         ]
+
         with tempfile.TemporaryDirectory() as tmpdir:
             md = experiment_report(
                 config=config,
@@ -343,6 +379,7 @@ class TestReporting(unittest.TestCase):
                 end_time="2026-08-20 00:10:00",
                 duration_seconds=600.0,
             )
+
             self.assertIn("# Experiment Report: ablation_study", md)
             self.assertIn("Comparative Leaderboard", md)
             self.assertIn("model.kbl_layers=[1]", md)
@@ -370,8 +407,10 @@ class TestReporting(unittest.TestCase):
                 ],
             }
         ]
+
         with tempfile.TemporaryDirectory() as tmpdir:
             md = experiment_report(config=config, sweep_results=sweep_results, save_path=tmpdir)
+
             self.assertIn("## Optimal Configuration", md)
             self.assertIn("- **Configuration:** `training.lr=0.001`", md)
             self.assertIn("- **Best Accuracy:** `0.9765 ± 0.0000`", md)

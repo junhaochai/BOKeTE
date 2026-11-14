@@ -41,6 +41,7 @@ def create_trial_runner(
     """
     def run_fn(trial_num: int, config: Dict[str, Any], output_dir: Optional[str] = None, total_trials: int = 1) -> Dict[str, Any]:
         run_fn.model_metadata = None
+
         config = asdict(config) if is_dataclass(config) else config
         exp_name = config.get("experiment_name") if isinstance(config, dict) else getattr(config, "experiment_name", None)
         if not exp_name or not str(exp_name).strip():
@@ -49,9 +50,12 @@ def create_trial_runner(
         # 1. Set seed per trial for stochastic variance
         base_seed = config.get("seed", 42)
         trial_seed = base_seed + (trial_num - 1)
+
         monitor = utils.get_nested_key(config, "training.monitor", default="val_loss")
         metrics_mod.monitor_mode(monitor)
+
         utils.set_seed(trial_seed, deterministic=config.get("deterministic", False))
+
         resume_from = _trial_resume_path(config, "resume_from", trial_num)
         resume_best_from = _trial_resume_path(config, "resume_best_from", trial_num)
         if resume_best_from is not None and resume_from is None:
@@ -96,6 +100,7 @@ def create_trial_runner(
             requested_device = config.get("device")
             device = (torch.device(requested_device) if requested_device is not None
                       else utils.determine_device(verbose=is_first_trial))
+
             should_log_struct = log_model_structure and is_first_trial
 
             amp = bool(utils.get_nested_key(config, "training.amp", default=False))
@@ -140,6 +145,7 @@ def create_trial_runner(
             extra_metrics = _evaluate_test_metrics(
                 model, test_fn, test_loader, config, best_ckpt_path,
             )
+
             result = history.as_dict()
             result["best_checkpoint_available"] = checkpoint.best_saved or original_best is not None
             if extra_metrics:
@@ -159,16 +165,19 @@ def create_trial_runner(
 
         except KeyboardInterrupt as exc:
             logger.warning("[BOKeTE] Trial interrupted; retaining files in %s", trial_dir)
+
             partial_history = getattr(exc, "history", history)
             if partial_history is None:
                 partial_history = metrics_mod.TrainingMetrics(
                     monitor=monitor, interrupted=True, runtime=utils.runtime_metadata(),
                 )
             partial_history.interrupted = True
+
             reporting.trial_report(
                 config=config, metrics=partial_history, save_path=trial_dir,
                 title=f"{exp_name} - Trial {trial_num}",
             )
+
             raise training.TrainingInterrupted(partial_history) from None
 
     run_fn.model_factory = model_factory  # type: ignore[attr-defined]
@@ -181,6 +190,7 @@ def _trial_resume_path(config, key, trial_num):
         raise ValueError(f"training.{key} must map trial numbers to checkpoint paths.")
     if any(not str(label).isdecimal() or int(label) < 1 for label in paths):
         raise ValueError(f"training.{key} requires positive trial numbers outside sweeps.")
+
     path = paths.get(trial_num, paths.get(str(trial_num)))
     return Path(path) if path is not None else None
 
@@ -189,19 +199,24 @@ def _retain_resume_best(resume_from, explicit_best, checkpoint):
     """Retain only best weights matching the selected epoch in the resume history."""
     if resume_from is None:
         return None
+
     saved = torch.load(resume_from, map_location="cpu", weights_only=True)
     state = saved.get("training_state")
     if state is None:
         raise ValueError("Checkpoint does not contain supported full training state.")
+
     selection = metrics_mod.selection_summary({**state["history"], "monitor": saved["monitor"]})
     source = explicit_best or (resume_from if saved["epoch"] == selection["best_epoch"]
                                else resume_from.with_name("best.pt"))
+
     del saved
+
     if not source.is_file():
         if explicit_best is not None:
             raise FileNotFoundError(source)
         logger.warning("[BOKeTE] Original best checkpoint unavailable: %s", source)
         return None
+
     best = torch.load(source, map_location="cpu", weights_only=True)
     if (best.get("epoch") != selection["best_epoch"]
             or best.get("score") != selection["best_score"]
@@ -210,6 +225,7 @@ def _retain_resume_best(resume_from, explicit_best, checkpoint):
             raise ValueError("Original best checkpoint does not match the resumed selection.")
         logger.warning("[BOKeTE] Original best checkpoint does not match the resumed selection: %s", source)
         return None
+
     destination = checkpoint.directory / "best.pt"
     if checkpoint.enabled and source.resolve() != destination.resolve():
         checkpoint.directory.mkdir(parents=True, exist_ok=True)
@@ -239,6 +255,7 @@ def _evaluate_test_metrics(model, test_fn, test_loader, config, best_checkpoint)
         raw_model = getattr(model, "module", model)
         raw_model.load_state_dict(ckpt_data["model_state_dict"])
         del ckpt_data
+
         raw_best_metrics = _eval_model(model) or {}
         for k, v in raw_best_metrics.items():
             extra_metrics[f"Best {k}"] = v

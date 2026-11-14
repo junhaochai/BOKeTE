@@ -19,8 +19,10 @@ try:
 finally:
     assert not {'torch', 'matplotlib', 'numpy'} & sys.modules.keys()
 """
+
         result = subprocess.run([sys.executable, "-B", "-c", code],
                                 cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True)
+
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("usage: bokete", result.stdout)
 
@@ -37,6 +39,7 @@ finally:
         with patch("sys.stderr", new_callable=io.StringIO) as stderr:
             with self.assertRaises(SystemExit) as error:
                 init_project(".")
+
         self.assertEqual(error.exception.code, 1)
         self.assertIn("already exists", stderr.getvalue())
 
@@ -46,5 +49,6 @@ finally:
             with patch("sys.stderr", new_callable=io.StringIO) as stderr:
                 with self.assertRaises(SystemExit) as error:
                     init_project("missing-example-project")
+
         self.assertEqual(error.exception.code, 1)
         self.assertIn("could not be located", stderr.getvalue())

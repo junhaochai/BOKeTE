@@ -56,6 +56,7 @@ def _atomic_save(state, destination):
         dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp", delete=False,
     ) as handle:
         temporary = Path(handle.name)
+
     try:
         torch.save(state, temporary)
         os.replace(temporary, destination)
@@ -66,6 +67,7 @@ def _atomic_save(state, destination):
 def _valid_targets(criterion, targets):
     if not isinstance(targets, torch.Tensor):
         return None
+
     ignore_index = getattr(criterion, "ignore_index", None)
     if ignore_index is not None and not targets.is_floating_point():
         return targets != ignore_index
@@ -77,22 +79,27 @@ def _loss_weight(criterion, outputs, targets):
     reduction = getattr(criterion, "reduction", "mean")
     if reduction not in ("mean", "sum", "batchmean"):
         raise ValueError("Loss reporting requires a scalar mean, sum or batchmean reduction.")
+
     if reduction == "batchmean" or not isinstance(targets, torch.Tensor):
         return outputs.shape[0] if isinstance(outputs, torch.Tensor) and outputs.ndim else 1
+
     if isinstance(criterion, (torch.nn.CrossEntropyLoss, torch.nn.NLLLoss)):
         if targets.is_floating_point():
             class_dim = 1 if targets.ndim > 1 else 0
             return targets.numel() / targets.shape[class_dim]
+
         valid_targets = targets[_valid_targets(criterion, targets)]
         if reduction == "mean" and criterion.weight is not None:
             return criterion.weight[valid_targets.long()].sum().item()
         return valid_targets.numel()
+
     if isinstance(criterion, (
         torch.nn.L1Loss, torch.nn.MSELoss, torch.nn.SmoothL1Loss, torch.nn.HuberLoss,
         torch.nn.BCELoss, torch.nn.BCEWithLogitsLoss, torch.nn.KLDivLoss,
         torch.nn.PoissonNLLLoss, torch.nn.SoftMarginLoss, torch.nn.HingeEmbeddingLoss,
     )):
         return math.prod(torch.broadcast_shapes(outputs.shape, targets.shape))
+
     # Custom scalar criteria are assumed to return a per-sample mean.
     return targets.shape[0] if targets.ndim else 1
 
@@ -117,6 +124,7 @@ def _loader_generators(loaders):
             generator = getattr(owner, "generator", None)
             if isinstance(generator, torch.Generator):
                 generators[f"{name}.{source}"] = generator
+
     return generators
 
 
@@ -138,6 +146,7 @@ def _restore_rng_state(state, loaders):
     generators = _loader_generators(loaders)
     if generators.keys() != state["loaders"].keys():
         raise ValueError("Resume requires matching DataLoader generator configuration.")
+
     cuda_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
     if len(state["cuda"]) != cuda_count:
         raise ValueError("Resume requires the same number of visible CUDA devices.")
@@ -147,6 +156,7 @@ def _restore_rng_state(state, loaders):
     np.random.set_state((
         name, np.asarray(keys, dtype=np.uint32), position, has_gauss, cached_gaussian,
     ))
+
     torch.set_rng_state(state["torch"])
     if state["cuda"]:
         torch.cuda.set_rng_state_all(state["cuda"])
@@ -163,6 +173,7 @@ class EarlyStopping:
     def __init__(self, patience=10, min_delta=0.0, *, monitor="val_loss"):
         if min_delta < 0:
             raise ValueError("min_delta must be non-negative.")
+
         self.patience = patience
         self.min_delta = min_delta
         self.monitor = monitor
@@ -174,11 +185,13 @@ class EarlyStopping:
         """Record the monitored score. Returns True when patience is exhausted."""
         if self.patience is None or self.patience <= 0:
             return False
+
         if metrics.is_improvement(val_loss, self.best_score, self.mode, self.min_delta):
             self.best_score = val_loss
             self.bad_epochs = 0
         else:
             self.bad_epochs += 1
+
         return self.bad_epochs >= self.patience
 
     def state_dict(self):
@@ -226,10 +239,12 @@ class Checkpoint:
     def update(self, model, epoch, val_loss, optimizer=None, *, score=None, training_state=None):
         if not self.enabled or not (self.save_best or self.save_last):
             return
+
         if score is None:
             if self.monitor != "val_loss":
                 raise ValueError("An explicit score is required when monitoring validation accuracy.")
             score = val_loss
+
         improved = metrics.is_improvement(score, self.best_score, self.mode)
         best_score = score if improved else self.best_score
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -244,6 +259,7 @@ class Checkpoint:
             'best_score': best_score,
             'model_state_dict': raw_model.state_dict(),
         }
+
         if optimizer is not None:
             state['optimizer_state_dict'] = optimizer.state_dict()
         if training_state is not None:
@@ -254,6 +270,7 @@ class Checkpoint:
         if self.save_best and improved:
             _atomic_save(state, self.directory / 'best.pt')
             self.best_saved = True
+
         self.best_score = best_score
 
     def on_epoch_end(self, trainer: Any, epoch: int, val_loss: float) -> None:
@@ -289,6 +306,7 @@ def evaluate(model, loader, criterion, device=None, prepare_batch=None, amp_acti
         prepare_batch = _default_prepare_batch
 
     model.eval()
+
     running_loss = 0.0
     total_weight = 0.0
     correct = 0
@@ -300,6 +318,7 @@ def evaluate(model, loader, criterion, device=None, prepare_batch=None, amp_acti
             valid = _valid_targets(criterion, targets)
             if valid is not None and not valid.any():
                 continue
+
             with torch.autocast(device_type=device.type, enabled=amp_active):
                 outputs = model(inputs)
                 weight = _loss_weight(criterion, outputs, targets)
@@ -316,19 +335,23 @@ def evaluate(model, loader, criterion, device=None, prepare_batch=None, amp_acti
                 else:
                     batch_loss = criterion(outputs, targets).item()
                     batch_total = _loss_contribution(batch_loss, weight, getattr(criterion, "reduction", "mean"))
+
             running_loss += batch_total
             total_weight += weight
+
             if collect_accuracy:
                 if (not isinstance(targets, torch.Tensor)
                         or outputs.ndim != 2 or outputs.shape[1] < 2 or targets.ndim != 1
                         or outputs.shape[0] != targets.shape[0]
                         or targets.dtype not in (torch.int8, torch.int16, torch.int32, torch.int64, torch.uint8)):
                     raise ValueError("val_accuracy requires [batch, classes] outputs and [batch] class-index targets.")
+
                 correct += ((outputs.argmax(dim=1) == targets) & valid).sum().item()
                 total += valid.sum().item()
 
     if total_weight == 0:
         raise ValueError("Cannot evaluate an empty loader or with no valid targets.")
+
     loss = _epoch_loss(running_loss, total_weight, getattr(criterion, "reduction", "mean"))
     if collect_accuracy:
         if total == 0:
@@ -411,10 +434,13 @@ class Trainer:
     ) -> float:
         """Run one training epoch over `train_loader` and return the mean training loss."""
         self.model.train()
+
         deterministic = (torch.are_deterministic_algorithms_enabled()
                          or torch.backends.cudnn.deterministic)
+
         if deterministic:
             torch.backends.cudnn.benchmark = False
+
         running_loss = 0.0
         total_weight = 0.0
         batches_run = 0
@@ -458,6 +484,7 @@ class Trainer:
                 weight = _loss_weight(self.criterion, outputs, targets)
                 if weight == 0:
                     raise ValueError("Cannot train a mean-reduced batch with zero total class weight.")
+
                 loss = self.criterion(outputs, targets)
 
             self.scaler.scale(loss).backward()
@@ -473,11 +500,13 @@ class Trainer:
             running_loss += _loss_contribution(loss_val, weight, getattr(self.criterion, "reduction", "mean"))
             total_weight += weight
             batches_run += 1
+
             avg_loss = _epoch_loss(running_loss, total_weight, getattr(self.criterion, "reduction", "mean"))
             batch_pbar.set_postfix(loss=f"{avg_loss:.4f}", refresh=False)
 
         if total_weight == 0:
             raise ValueError("Cannot train on an empty loader or with no valid targets.")
+
         return round(avg_loss, 4)
 
     def _restore_checkpoint(self, path, history, loaders, stateful_callbacks, checkpoints):
@@ -491,6 +520,7 @@ class Trainer:
             raise ValueError("Resume requires the same monitored metric.")
         if state["amp_active"] != self.amp_active:
             raise ValueError("Resume requires the same AMP configuration.")
+
         if "deterministic" in state:
             settings = ("algorithms", "warn_only", "cudnn")
             if self.device.type == "cuda" and state["deterministic"]["algorithms"]:
@@ -498,6 +528,7 @@ class Trainer:
             current_settings = utils._deterministic_settings()
             if any(state["deterministic"][key] != current_settings[key] for key in settings):
                 raise ValueError("Resume requires the same deterministic settings.")
+
         if state["callback_types"] != _callback_types(stateful_callbacks):
             raise ValueError("Resume requires matching stateful callback types and order.")
         if len(state["callback_states"]) != len(stateful_callbacks):
@@ -509,6 +540,7 @@ class Trainer:
             cb.load_state_dict(cb_state)
         self.optimizer.load_state_dict(saved["optimizer_state_dict"])
         self.scaler.load_state_dict(state["scaler_state_dict"])
+
         for field in _HISTORY_FIELDS:
             setattr(history, field, state["history"][field])
         for cb in checkpoints:
@@ -564,6 +596,7 @@ class Trainer:
         """
         self.mode = metrics.monitor_mode(monitor)
         self.monitor = monitor
+
         m_obj = metrics.TrainingMetrics(monitor=monitor, runtime=utils.runtime_metadata())
         start_dt = datetime.now()
         start_time_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -585,6 +618,7 @@ class Trainer:
             all_callbacks.append(checkpoint)
         if scheduler and scheduler not in all_callbacks:
             all_callbacks.append(scheduler)
+
         for cb in all_callbacks:
             if isinstance(cb, (EarlyStopping, Checkpoint)):
                 cb.monitor = monitor
@@ -594,6 +628,7 @@ class Trainer:
                     cb.bad_epochs = 0
                 else:
                     cb.best_saved = False
+
             if isinstance(cb, torch.optim.lr_scheduler.ReduceLROnPlateau) and cb.mode != self.mode:
                 raise ValueError("ReduceLROnPlateau mode must match the monitored metric direction.")
 
@@ -605,6 +640,7 @@ class Trainer:
             and callable(getattr(cb, "state_dict", None))
             and callable(getattr(cb, "load_state_dict", None))
         ]
+
         start_epoch = 0
         if resume_from is not None:
             start_epoch = self._restore_checkpoint(
@@ -615,6 +651,7 @@ class Trainer:
             for epoch in range(start_epoch, epochs):
                 if self.should_stop:
                     break
+
                 train_loss = self._train_epoch(
                     train_loader,
                     max_batches=max_train_batches,
@@ -622,11 +659,13 @@ class Trainer:
                     total_epochs=epochs,
                     show_progress=progress,
                 )
+
                 if monitor == "val_accuracy":
                     self.current_metrics = self.evaluate(val_loader, collect_accuracy=True)
                 else:
                     self.current_metrics = {"val_loss": self.evaluate(val_loader)}
                 val_loss = self.current_metrics["val_loss"]
+
                 m_obj.train_loss.append(train_loss)
                 m_obj.val_loss.append(val_loss)
                 if monitor == "val_accuracy":
@@ -653,6 +692,7 @@ class Trainer:
                         f" | Validation Accuracy: {self.current_metrics['val_accuracy']:.4f}"
                         if "val_accuracy" in self.current_metrics else ""
                     )
+
                     best_tag = f" {utils.Colours.BRIGHT_CYAN}★ (Best){utils.Colours.RESET}" if is_best else ""
                     logger.info(
                         f"[BOKeTE] {utils.format_epoch_label(epoch + 1, epochs)} | "
@@ -664,6 +704,7 @@ class Trainer:
                 for cb in all_callbacks:
                     if isinstance(cb, Checkpoint):
                         continue
+
                     if hasattr(cb, 'on_epoch_end'):
                         cb.on_epoch_end(self, epoch + 1, val_loss)
                     elif hasattr(cb, 'step'):
@@ -673,10 +714,12 @@ class Trainer:
                             cb.step()
 
                 m_obj.stopped_early = self.should_stop
+
                 if checkpoints:
                     self._checkpoint_state = self._build_checkpoint_state(
                         m_obj, loaders, stateful_callbacks,
                     )
+
                     for cb in checkpoints:
                         cb.on_epoch_end(self, epoch + 1, val_loss)
 
@@ -716,6 +759,7 @@ class Trainer:
             m_obj.best_epoch = selection["best_epoch"]
             m_obj.best_score = selection["best_score"]
             m_obj.best_val_loss = min(m_obj.val_loss) if m_obj.val_loss else None
+
             raise TrainingInterrupted(m_obj) from None
 
         return m_obj

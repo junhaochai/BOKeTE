@@ -46,7 +46,9 @@ class TestUtils(unittest.TestCase):
                 setup_logging(log_file=Path(tmpdir) / "experiment.log", console=False)
                 owned = next(h for h in root_logger.handlers if isinstance(h, logging.FileHandler)
                              and Path(h.baseFilename) == Path(tmpdir) / "experiment.log")
+
                 close_file_loggers()
+
                 self.assertIn(host, root_logger.handlers)
                 self.assertIsNotNone(host.stream)
                 self.assertNotIn(owned, root_logger.handlers)
@@ -62,11 +64,14 @@ class TestUtils(unittest.TestCase):
         except ValueError:
             record = logging.LogRecord("probe", logging.ERROR, __file__, 1, "failed", (), sys.exc_info(),
                                        sinfo="Stack evidence")
+
         formatted = BOKeTEFormatter(use_colors=True).format(record)
+
         self.assertIn("Traceback", formatted)
         self.assertIn("ValueError: diagnostic evidence", formatted)
         self.assertIn("Stack evidence", formatted)
         record.msg = ""
+
         self.assertIn("ValueError: diagnostic evidence", BOKeTEFormatter(use_colors=True).format(record))
 
     def test_unknown_config_keys_warn_with_nested_path(self):
@@ -83,6 +88,7 @@ class TestUtils(unittest.TestCase):
         with patch("bokete.utils.load_config", return_value={"training": {"lr": 0.0, "lrr": 0.1}}), \
                 self.assertLogs("bokete.utils", level="WARNING") as captured:
             config = load_config_as("unused.yaml", Config)
+
         self.assertEqual(config.training.lr, 0.0)
         self.assertIn("training.lrr", "\n".join(captured.output))
 
@@ -92,14 +98,17 @@ class TestUtils(unittest.TestCase):
         r1 = torch.randn(5)
         set_seed(42)
         r2 = torch.randn(5)
+
         self.assertTrue(torch.allclose(r1, r2))
 
     def test_determine_device(self):
         device = determine_device()
+
         self.assertIsInstance(device, torch.device)
 
     def test_get_device_name(self):
         dev_name = get_device_name()
+
         self.assertIsInstance(dev_name, str)
         self.assertGreater(len(dev_name), 0)
 
@@ -151,6 +160,7 @@ class TestUtils(unittest.TestCase):
         config_path = Path("src/bokete/templates/starter/configs/example.yaml")
         if config_path.exists():
             parsed = load_config_as(config_path, RootConfig)
+
             self.assertIsInstance(parsed, RootConfig)
             self.assertIsInstance(parsed.sub, SubConfig)
 
@@ -167,6 +177,7 @@ class TestUtils(unittest.TestCase):
                 DummyConfig,
                 args_list=["--config", str(config_path)],
             )
+
             self.assertIsInstance(cfg, DummyConfig)
 
             cfg_default = parse_cli_config(
@@ -174,16 +185,19 @@ class TestUtils(unittest.TestCase):
                 default_config=config_path,
                 args_list=[],
             )
+
             self.assertIsInstance(cfg_default, DummyConfig)
 
     def test_resolve_config_path(self):
         # 1. Exact path resolution
         resolved = resolve_config_path("src/bokete/templates/starter/configs/example.yaml")
+
         self.assertEqual(resolved, Path("src/bokete/templates/starter/configs/example.yaml"))
 
         # 2. Short name / configs/ folder resolution via mocking
         with patch.object(Path, "is_file", side_effect=[False, True]):
             res_short = resolve_config_path("example")
+
             self.assertEqual(res_short, Path("configs/example.yaml"))
 
     def test_resolve_output_path(self):
@@ -193,6 +207,7 @@ class TestUtils(unittest.TestCase):
 
     def test_create_progress_bar(self):
         pbar = create_progress_bar(range(10), desc="Testing", disable=True)
+
         self.assertIsNotNone(pbar)
         pbar.close()
 
@@ -206,6 +221,7 @@ class TestUtils(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = SampleConfig()
             run_dir = create_run_directory(cfg, base_dir=tmpdir, attach_file_logger=False)
+
             self.assertTrue(run_dir.exists())
             self.assertEqual(run_dir.parent.name, "my_experiment")
 
@@ -215,7 +231,9 @@ class TestUtils(unittest.TestCase):
             nn.ReLU(),
             nn.Linear(5, 1)
         )
+
         info = log_model_info(model, log_layers=True)
+
         self.assertEqual(info["model_name"], "Sequential")
         self.assertEqual(info["total_params"], 61)
         self.assertEqual(info["trainable_params"], 61)
@@ -236,6 +254,7 @@ class TestUtils(unittest.TestCase):
 
     def test_log_experiment_start(self):
         log_experiment_start(1, 4, "exp_sweep", params_str="training.lr=0.01, training.batch_size=32")
+
         with self.assertRaises(ValueError):
             log_experiment_start(1, 4, "")
 
@@ -252,6 +271,7 @@ class TestUtils(unittest.TestCase):
 
             self.assertTrue(log_path.exists())
             content = log_path.read_text(encoding="utf-8")
+
             self.assertIn("Test log entry", content)
 
             root_logger = logging.getLogger()
@@ -262,11 +282,13 @@ class TestUtils(unittest.TestCase):
 
     def test_design_system_helpers(self):
         epoch_str = format_epoch_label(1, 5)
+
         self.assertIn("Epoch", epoch_str)
         self.assertIn("1", epoch_str)
         self.assertIn("5", epoch_str)
 
         tag_str = format_tag("test_exp")
+
         self.assertIn("[test_exp]", tag_str)
 
 

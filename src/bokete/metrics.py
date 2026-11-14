@@ -55,6 +55,7 @@ def is_improvement(score: float, best: Optional[float], mode: str, min_delta: fl
     """Compare finite scores; ties retain the earlier epoch."""
     if not math.isfinite(score):
         raise ValueError("The monitored validation score must be finite.")
+
     return best is None or (score < best - min_delta if mode == "min" else score > best + min_delta)
 
 
@@ -64,16 +65,19 @@ def selection_summary(m: Dict[str, Any], monitor: Optional[str] = None) -> Dict[
     mode = monitor_mode(monitor)
     if m.get("monitor", monitor) != monitor or m.get("mode", mode) != mode:
         raise ValueError("Cannot compare runs with different monitoring settings.")
+
     values = m.get(monitor, [])
     if monitor == "val_accuracy" and not values and (m.get("train_loss") or m.get("val_loss")):
         raise ValueError("Validation accuracy was selected but no accuracy history was recorded.")
     if values and m.get("val_loss") and len(values) != len(m["val_loss"]):
         raise ValueError("Monitored metric and validation loss histories must have equal lengths.")
+
     best_score = None
     best_epoch = None
     for epoch, score in enumerate(values, 1):
         if is_improvement(score, best_score, mode):
             best_score, best_epoch = float(score), epoch
+
     return {"monitor": monitor, "mode": mode, "best_score": best_score, "best_epoch": best_epoch}
 
 
@@ -115,6 +119,7 @@ def training_report(metrics: Union[TrainingMetrics, Dict[str, Any]]) -> Dict[str
     summary.update(selection_summary(m))
     selected_epoch = summary['best_epoch']
     summary['selected_val_loss'] = val_loss[selected_epoch - 1] if selected_epoch and val_loss else None
+
     accuracy = m.get('val_accuracy', [])
     if accuracy:
         summary['final_val_accuracy'] = accuracy[-1]

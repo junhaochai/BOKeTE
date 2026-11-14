@@ -25,31 +25,37 @@ def main() -> None:
         transforms.ToTensor(),
         transforms.Normalize((0.1307,), (0.3081,)),
     ])
+
     ds_kwargs = dict(root=Path("./data"), download=True, transform=transform)
 
     def loader_factory(c: dict):
         batch_size = c.get("data", {}).get("batch_size", 64)
         val_batch_size = c.get("data", {}).get("val_batch_size", 1000)
+
         train_data, val_data = random_split(
             datasets.MNIST(train=True, **ds_kwargs),
             [50000, 10000],
             generator=torch.Generator().manual_seed(42),
         )
+
         t_loader = DataLoader(
             train_data,
             batch_size=batch_size,
             shuffle=True,
         )
+
         v_loader = DataLoader(
             val_data,
             batch_size=val_batch_size,
             shuffle=False,
         )
+
         test_loader = DataLoader(
             datasets.MNIST(train=False, **ds_kwargs),
             batch_size=val_batch_size,
             shuffle=False,
         )
+
         return t_loader, v_loader, test_loader
 
     # 3. Model Factory Callback
@@ -62,6 +68,7 @@ def main() -> None:
     def test_fn(model: torch.nn.Module, loader: DataLoader, c: dict) -> dict:
         device = next(model.parameters()).device
         model.eval()
+
         correct = 0
         total = 0
         total_loss = 0.0
@@ -73,6 +80,7 @@ def main() -> None:
                 outputs = model(inputs)
                 loss = criterion(outputs, targets)
                 total_loss += loss.item() * targets.size(0)
+
                 preds = outputs.argmax(dim=1)
                 correct += (preds == targets).sum().item()
                 total += targets.size(0)

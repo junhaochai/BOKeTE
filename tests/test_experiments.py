@@ -27,15 +27,18 @@ class TestExperiments(unittest.TestCase):
             "lr": 0.0, "epochs": 0, "amp": True, "max_grad_norm": 0.0,
             "log_interval": 0, "save_checkpoints": False,
         }}
+
         with patch("bokete.utils.load_config", return_value=raw):
             config = asdict(load_config_as("unused.yaml", ExperimentConfig))
         runner = create_trial_runner(lambda cfg: nn.Linear(1, 1), lambda cfg: ([], []))
+
         with tempfile.TemporaryDirectory() as tmpdir, \
                 patch("bokete.trial_runner.training.Trainer") as trainer, \
                 patch("bokete.trial_runner.reporting.trial_report"), \
                 patch("bokete.trial_runner.utils.determine_device") as detect:
             trainer.return_value.fit.return_value = TrainingMetrics()
             runner(1, config, output_dir=tmpdir)
+
         self.assertEqual(trainer.call_args.args[2].param_groups[0]["lr"], 0.0)
         self.assertEqual(trainer.call_args.kwargs["device"], torch.device("cpu"))
         self.assertTrue(trainer.call_args.kwargs["amp"])
@@ -74,6 +77,7 @@ class TestExperiments(unittest.TestCase):
 
                 results = run_experiments(config, run_fn=runner, output_dir=tmpdir,
                                           param_grid={"training.lr": [0.1]} if sweep else None)
+
                 self.assertEqual(received_trials, [1, 2])
                 self.assertEqual(len(results[0]["metrics"] if sweep else results), 2)
 
@@ -88,6 +92,7 @@ class TestExperiments(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             result = run_experiments(config, run_fn=runner, output_dir=tmpdir)
             report = (Path(tmpdir) / "experiment-report.md").read_text(encoding="utf-8")
+
         self.assertEqual(len(result), 1)
         self.assertIn("**Selection Metric:** `val_accuracy` (maximise)", report)
 
@@ -98,10 +103,12 @@ class TestExperiments(unittest.TestCase):
 
         runner = create_trial_runner(lambda config: nn.Linear(2, 2), loaders)
         config = {"experiment_name": "accuracy_runner", "training": {"epochs": 1, "monitor": "val_accuracy"}}
+
         with tempfile.TemporaryDirectory() as tmpdir:
             result = runner(1, config, output_dir=tmpdir)
             checkpoint = torch.load(Path(tmpdir) / "trial_1" / "checkpoints" / "best.pt", weights_only=True)
             report = (Path(tmpdir) / "trial_1" / "report.md").read_text(encoding="utf-8")
+
         self.assertEqual(result["monitor"], "val_accuracy")
         self.assertEqual(len(result["val_accuracy"]), 1)
         self.assertEqual(checkpoint["score"], result["val_accuracy"][0])
@@ -118,6 +125,7 @@ class TestExperiments(unittest.TestCase):
             with self.assertLogs("bokete.experiments", level="INFO") as logs:
                 run_experiments(config, run_fn=runner, output_dir=tmpdir)
             report = (Path(tmpdir) / "config-report.md").read_text(encoding="utf-8")
+
         self.assertTrue(any("Best Validation Accuracy:" in entry for entry in logs.output))
         self.assertIn("Selected Validation Accuracy", report)
 
@@ -131,6 +139,7 @@ class TestExperiments(unittest.TestCase):
             with patch.object(sys, "path", sys.path.copy()), \
                     patch.object(sys, "argv", ["main.py", "--config", str(project / "configs/example.yaml")]):
                 res = runpy.run_path(str(project / "main.py"))
+
                 self.assertTrue(callable(res["main"]))
 
     def test_create_trial_runner(self):
@@ -145,6 +154,7 @@ class TestExperiments(unittest.TestCase):
             return loader, loader
 
         runner = create_trial_runner(model_factory, loader_factory)
+
         self.assertIsNotNone(runner)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -153,7 +163,9 @@ class TestExperiments(unittest.TestCase):
                 "seed": 42,
                 "training": {"epochs": 2, "lr": 0.01, "loss": "MSELoss", "optimizer": "Adam"},
             }
+
             metrics = runner(1, config, output_dir=tmpdir)
+
             self.assertIn("train_loss", metrics)
             self.assertIn("val_loss", metrics)
             self.assertTrue((Path(tmpdir) / "trial_1" / "report.md").exists())
@@ -172,13 +184,16 @@ class TestExperiments(unittest.TestCase):
             return {"test_accuracy": 0.95}
 
         runner = create_trial_runner(model_factory, loader_factory, test_fn=test_fn_with_loader)
+
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "experiment_name": "test_fn_test",
                 "training": {"epochs": 1, "lr": 0.01, "loss": "MSELoss", "optimizer": "Adam"},
             }
+
             with patch("bokete.trial_runner.torch.load", wraps=torch.load) as load_checkpoint:
                 res = runner(1, config, output_dir=tmpdir)
+
             self.assertEqual(load_checkpoint.call_args.kwargs["map_location"], "cpu")
             self.assertIn("extra_metrics", res)
             self.assertEqual(res["extra_metrics"]["Best test_accuracy"], 0.95)
@@ -188,11 +203,13 @@ class TestExperiments(unittest.TestCase):
         history = TrainingMetrics(
             train_loss=[0.2, 0.1], val_loss=[0.1, 0.5], best_epoch=1, best_val_loss=0.1,
         )
+
         runner = create_trial_runner(
             lambda cfg: nn.Linear(1, 1),
             lambda cfg: ([], []),
             test_fn=lambda model, cfg: {"accuracy": 0.4},
         )
+
         config = {"experiment_name": "no_checkpoint", "training": {"save_checkpoints": False}}
         for stale_checkpoint in (False, True):
             with self.subTest(stale_checkpoint=stale_checkpoint), tempfile.TemporaryDirectory() as tmpdir:
@@ -201,10 +218,12 @@ class TestExperiments(unittest.TestCase):
                     checkpoint_dir.mkdir(parents=True)
                     # Invalid content must never be read when this run saves no checkpoint.
                     (checkpoint_dir / "best.pt").write_bytes(b"previous run")
+
                 with patch("bokete.trial_runner.training.Trainer.fit", return_value=history):
                     with patch("bokete.trial_runner.reporting.trial_report"):
                         with patch("bokete.trial_runner.torch.load") as load_checkpoint:
                             result = runner(1, config, output_dir=tmpdir)
+
                 load_checkpoint.assert_not_called()
                 self.assertEqual(result["extra_metrics"], {"Final accuracy": 0.4})
 
@@ -216,6 +235,7 @@ class TestExperiments(unittest.TestCase):
             return {"train_loss": [0.5], "val_loss": [0.6]}
 
         results = run_experiments(base_config, param_grid, dummy_run_fn)
+
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0]["parameters"]["training.lr"], 0.01)
         self.assertEqual(results[1]["parameters"]["training.lr"], 0.001)
@@ -228,6 +248,7 @@ class TestExperiments(unittest.TestCase):
             return {"train_loss": [0.5]}
 
         results = run_experiments(base_config, param_grid, dummy_run_fn)
+
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0]["parameters"]["model.layer_sizes"], [256, 128])
         self.assertEqual(results[1]["parameters"]["model.layer_sizes"], [512, 256, 128])
@@ -240,6 +261,7 @@ class TestExperiments(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             metrics_list = run_experiments(config, num_trials=2, run_fn=dummy_trial_fn, output_dir=tmpdir)
+
             self.assertEqual(len(metrics_list), 2)
             self.assertTrue((Path(tmpdir) / "config-report.md").exists())
 
@@ -253,8 +275,10 @@ class TestExperiments(unittest.TestCase):
             return nn.Linear(5, 1)
 
         runner = create_trial_runner(dummy_model_factory, interrupting_loader_factory)
+
         with tempfile.TemporaryDirectory() as tmpdir:
             res = run_experiments(config, num_trials=1, run_fn=runner, output_dir=tmpdir)
+
             self.assertEqual(len(res), 1)
             self.assertEqual(res[0]["status"], "interrupted")
             self.assertEqual(res[0]["val_loss"], [])

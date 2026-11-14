@@ -32,6 +32,7 @@ def _extra_metric_keys(histories):
             for key in history["extra_metrics"]:
                 if key not in keys:
                     keys.append(key)
+
     return keys
 
 
@@ -47,8 +48,10 @@ def _extra_metric_stats(histories, keys):
                     values.append(float(extra[key]))
                 except (ValueError, TypeError):
                     pass
+
         if values:
             stats[key] = (float(np.mean(values)), float(np.std(values)))
+
     return stats
 
 
@@ -68,13 +71,16 @@ def _runtime_section(histories):
         runtime = history.get("runtime")
         if runtime and runtime not in environments:
             environments.append(runtime)
+
     if not environments:
         return "\n## Runtime Environment\nNot recorded.\n"
+
     sections = []
     for index, runtime in enumerate(environments, 1):
         rows = "\n".join(f"| `{key}` | `{value}` |" for key, value in utils.flatten_dict(runtime).items())
         label = f"\n### Environment {index}\n" if len(environments) > 1 else ""
         sections.append(f"{label}\n| Setting | Recorded Value |\n| :--- | :--- |\n{rows}\n")
+
     return "\n## Runtime Environment\n" + "".join(sections)
 
 
@@ -84,6 +90,7 @@ def _resolve_device_string(
     """Formats execution device string from summary metric or config."""
     if explicit_device:
         return explicit_device
+
     dev_cfg = config.get("device")
     dev_obj = torch.device(dev_cfg) if dev_cfg else utils.determine_device(verbose=False)
     dev_gpu = utils.get_device_name(dev_obj)
@@ -112,6 +119,7 @@ def _extract_model_info(model: Any) -> tuple[str, int, int, str]:
         missing = [k for k in ("model_name", "total_params", "trainable_params") if k not in model]
         if missing:
             raise ValueError(f"Model checkpoint dictionary missing required key(s): {', '.join(missing)}")
+
         return str(model["model_name"]), int(model["total_params"]), int(model["trainable_params"]), str(model.get("structure", ""))
 
     # Invalid model input (neither a PyTorch model nor a checkpoint dict)
@@ -179,11 +187,13 @@ def trial_report(
         m = metrics if isinstance(metrics, dict) else metrics.as_dict()
         selection = metrics_mod.selection_summary(m, configured_monitor)
         m = {**m, **selection}
+
         if metrics_summary is None:
             metrics_summary = metrics_mod.training_report(m) if m.get('train_loss') else dict(m)
         else:
             metrics_mod.selection_summary(metrics_summary, selection['monitor'])
             metrics_summary = {**metrics_summary, **selection}
+
         if train_loss is None:
             train_loss = m.get('train_loss', [])
         if val_loss is None:
@@ -311,8 +321,10 @@ def trial_report(
         f"| {epoch + 1} | {t:.4f} | {v:.4f} |" + (f" {accuracy[epoch]:.4f} |" if accuracy else "")
         for epoch, (t, v) in enumerate(zip(train_loss, val_loss))
     ])
+
     loss_graph = (f"\n## Loss Curves\n![Loss Curve](./{graph_filename})\n"
                   if graph_available and graph_filename and train_loss and val_loss else "")
+
     runtime_section = _runtime_section([recorded])
 
     report_md = f"""# {header_title}
@@ -345,6 +357,7 @@ def trial_report(
 
 </details>
 """
+
     _write_report(out_file, report_md)
     return report_md
 
@@ -382,6 +395,7 @@ def config_report(
     scored_trials = [(all_trial_metrics[idx - 1].get('trial', idx), s['best_score'])
                      for idx, s in enumerate(selections, 1)
                      if s['best_score'] is not None and not all_trial_metrics[idx - 1].get('interrupted')]
+
     best_val_losses = [score for _, score in scored_trials]
     if best_val_losses:
         mean_val = float(np.mean(best_val_losses))
@@ -480,6 +494,7 @@ def config_report(
 | :--- | :--- |
 {param_rows}
 """
+
     _write_report(out_file, report_md)
     return report_md
 
@@ -503,8 +518,10 @@ def experiment_report(
         for history in result.get('metrics', []):
             selection = metrics_mod.selection_summary(history, effective_monitor)
             run_monitors.append(selection['monitor'])
+
     if len(set(run_monitors)) > 1:
         raise ValueError("Cannot compare runs with different monitoring settings.")
+
     monitor = run_monitors[0] if run_monitors else base_monitor or 'val_loss'
     mode = metrics_mod.monitor_mode(monitor)
     metric_label = utils.format_metric_name(monitor)
@@ -641,6 +658,7 @@ def experiment_report(
 | :--- | :--- |
 {param_rows}
 """
+
     _write_report(out_file, report_md)
     return report_md
 

@@ -161,6 +161,7 @@ def set_seed(seed: int, deterministic: bool = False) -> None:
     torch.use_deterministic_algorithms(deterministic)
     torch.backends.cudnn.deterministic = deterministic
     torch.backends.cudnn.benchmark = False
+
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -213,9 +214,11 @@ def format_duration(seconds: Optional[float]) -> str:
     """Formats duration in seconds into a human-readable string (e.g., '14.20s', '03m 45s', '01h 10m 05s')."""
     if seconds is None or seconds < 0:
         return "N/A"
+
     seconds = float(seconds)
     if seconds < 60:
         return f"{seconds:.2f}s"
+
     minutes, secs = divmod(int(seconds), 60)
     hours, minutes = divmod(minutes, 60)
     if hours > 0:
@@ -278,6 +281,7 @@ def resolve_config_path(config_path: str | Path) -> Path:
     p = Path(config_path)
     if p.is_file() or p.parent != Path("."):
         return p
+
     name = f"{p.stem}.yaml" if not p.suffix else p.name
     candidates = [Path("configs") / name, p]
     return next((c for c in candidates if c.is_file()), p)
@@ -289,6 +293,7 @@ def resolve_output_path(
     """Resolves output target Path for saved reports, plots, or artifact files."""
     if not save_path:
         return None
+
     target_path = Path(save_path)
     return target_path / filename if (target_path.is_dir() or not target_path.suffix) else target_path
 
@@ -326,6 +331,7 @@ def log_dataset_info(
     if details:
         items = [f"{k.replace('_', ' ').title()}: {v}" for k, v in details.items()]
         detail_str = f" ({', '.join(items)})"
+
     logger.info(f"[BOKeTE] Dataset configuration: {name}{detail_str}")
     if train_samples is not None:
         logger.info(f"[BOKeTE] Loaded Train dataset subset: {train_samples:,} samples")
@@ -425,6 +431,7 @@ def setup_logging(
             isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
             for h in root_logger.handlers
         )
+
         if not has_console:
             ch = TqdmLoggingHandler()
             is_tty = hasattr(ch.stream, "isatty") and ch.stream.isatty()
@@ -439,6 +446,7 @@ def setup_logging(
             isinstance(h, logging.FileHandler) and Path(getattr(h, "baseFilename", "")).resolve() == file_path
             for h in root_logger.handlers
         )
+
         if not already_attached:
             fh = logging.FileHandler(file_path, mode="a", encoding="utf-8")
             fh.set_name("bokete.file")
@@ -464,6 +472,7 @@ def create_progress_bar(
         "{desc}: {percentage:3.0f}%|\033[34m{bar}\033[0m| "
         "{n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]",
     )
+
     return tqdm.tqdm(
         iterable,
         desc=desc,
@@ -522,6 +531,7 @@ def create_run_directory(
             parts = d.name.rsplit("-", 1)
             if len(parts) == 2 and parts[1].isdigit():
                 existing_indices.append(int(parts[1]))
+
     next_idx = max(existing_indices, default=0) + 1
     while True:
         run_dir = target_parent / f"{date_prefix}-{next_idx:02d}"
@@ -547,6 +557,7 @@ def flatten_dict(d: Dict[str, Any], parent_key: str = "") -> Dict[str, Any]:
             items.extend(flatten_dict(v, new_key).items())
         else:
             items.append((new_key, v))
+
     return dict(items)
 
 
@@ -561,6 +572,7 @@ def get_nested_key(d: Dict[str, Any], key_path: str, default: Any = None) -> Any
         if not isinstance(current, dict) or k not in current:
             return default
         current = current[k]
+
     return current if current is not None else default
 
 
@@ -569,6 +581,7 @@ def set_nested_key(d: Dict[str, Any], key_path: str, value: Any) -> None:
     parts = key_path.split(".")
     for part in parts[:-1]:
         d = d.setdefault(part, {})
+
     d[parts[-1]] = value
 
 
@@ -596,6 +609,7 @@ def load_config_as(config_path: str | Path, dataclass_cls: Type[T]) -> T:
         if unknown:
             logger.warning("[BOKeTE] Ignoring unknown configuration keys: %s",
                            ", ".join(sorted(f"{prefix}{key}" for key in unknown)))
+
         kwargs = {}
         for f in declared_fields:
             if f.name in data:
@@ -608,6 +622,7 @@ def load_config_as(config_path: str | Path, dataclass_cls: Type[T]) -> T:
                     kwargs[f.name] = _from_dict(target_type, val, f"{prefix}{f.name}.")
                 else:
                     kwargs[f.name] = val
+
         return cls(**kwargs)
 
     return _from_dict(dataclass_cls, raw or {})
@@ -628,5 +643,7 @@ def parse_cli_config(
         help="Path to YAML configuration file",
         required=default_config is None,
     )
+
     parsed_args = parser.parse_args(args_list)
+
     return load_config_as(parsed_args.config, dataclass_cls)
