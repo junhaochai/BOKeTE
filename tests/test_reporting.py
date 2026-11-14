@@ -68,7 +68,7 @@ class TestReporting(unittest.TestCase):
         config = {"training": {"monitor": "val_accuracy"}}
         history = {"train_loss": [0.3, 0.2], "val_loss": [0.1, 0.5], "val_accuracy": [0.6, 0.9]}
 
-        with patch("bokete.reporting.plotting.plot_loss_curves") as plot:
+        with patch("bokete.reporting.trial_report.plotting.plot_loss_curves") as plot:
             report = trial_report(config, metrics=history)
 
         self.assertIn("**Selected Epoch:** `2` (Validation Accuracy: `0.9`)", report)
